@@ -24,6 +24,7 @@
 #include "haptics_apple.h"
 #include "motion_apple.h"
 #include "motion_fusion.h"
+#include "DmPointerDrag.h"
 #include <stdatomic.h>
 
 enum { B_A = 0, B_B, B_X, B_Y, B_LS, B_RS, B_L, B_R, B_ZL, B_ZR, B_PLUS, B_MINUS, B_LEFT, B_UP, B_RIGHT, B_DOWN, B_N };
@@ -34,12 +35,14 @@ static uint64_t g_touch_btn, g_pad_btn, g_shake_btn;
 static uint64_t g_keyboard_btn;
 static int g_keyboard_w, g_keyboard_a, g_keyboard_s, g_keyboard_d;
 static int32_t g_touch_lx, g_touch_ly, g_touch_rx, g_touch_ry, g_pad_lx, g_pad_ly, g_pad_rx, g_pad_ry;
+static int32_t g_pointer_rx, g_pointer_ry;
 static int tilted(int32_t x, int32_t y) { return (int64_t)x * x + (int64_t)y * y > (int64_t)4000 * 4000; }
 static void publish(void) {
     pthread_mutex_lock(&g_mu);
     int32_t lx = g_touch_lx, ly = g_touch_ly, rx = g_touch_rx, ry = g_touch_ry;
     int32_t keyboardLeft = (g_keyboard_d - g_keyboard_a) * 32767, keyboardUp = (g_keyboard_w - g_keyboard_s) * 32767;
     if (keyboardLeft || keyboardUp) { lx = keyboardLeft; ly = keyboardUp; }
+    if (g_pointer_rx || g_pointer_ry) { rx = g_pointer_rx; ry = g_pointer_ry; }
     if (tilted(g_pad_lx, g_pad_ly)) { lx = g_pad_lx; ly = g_pad_ly; }   // a tilted physical stick wins
     if (tilted(g_pad_rx, g_pad_ry)) { rx = g_pad_rx; ry = g_pad_ry; }
     dm_input_set(g_touch_btn | g_pad_btn | g_shake_btn | g_keyboard_btn, lx, ly, rx, ry);
@@ -194,6 +197,14 @@ static __weak DmGamepad *g_view;
     UITouch *_game[16];                            // touches on the game's touch screen by finger slot
     GCKeyboard *_keyboard;
     BOOL _keyboardEditing;
+    UITouch *_pointerTouch;
+    DmPointerDrag _pointerDrag;
+    NSTimer *_pointerTimer;
+    NSMutableArray<NSValue *> *_pointerClicks;
+    NSInteger _pointerClickSlot;
+    CGPoint _pointerClickPosition;
+    CFTimeInterval _pointerClickUntil, _pointerClickGapUntil;
+    CGRect _pointerBounds;
 }
 
 static UIColor *k_idle, *k_on, *k_line, *k_ringFill, *k_text, *k_textOn;
@@ -226,6 +237,7 @@ static BOOL fullOnly(int b) { return b == B_LS || b == B_RS || b >= B_LEFT; }   
             k_ringFill = [UIColor colorWithWhite:1 alpha:0.06]; k_text = [UIColor colorWithWhite:1 alpha:0.6]; k_textOn = [UIColor colorWithWhite:0 alpha:0.7];
         });
         _controls = [CALayer layer]; [self.layer addSublayer:_controls];
+        _pointerClicks = [NSMutableArray array]; _pointerClickSlot = -1;
         _ring = shape(_controls); _ring.fillColor = k_ringFill.CGColor;
         _knob = shape(_controls);
         CAShapeLayer *in = [CAShapeLayer layer]; in.fillColor = nil; in.strokeColor = k_line.CGColor; in.lineWidth = 1.5;   // inner ring of the knob
@@ -250,6 +262,9 @@ static BOOL fullOnly(int b) { return b == B_LS || b == B_RS || b >= B_LEFT; }   
         for (NSNotificationName name in @[UITextFieldTextDidBeginEditingNotification, UITextFieldTextDidEndEditingNotification,
                                            UITextViewTextDidBeginEditingNotification, UITextViewTextDidEndEditingNotification])
             [nc addObserver:self selector:@selector(KeyboardTextChanged:) name:name object:nil];
+        for (NSNotificationName name in @[UIApplicationWillResignActiveNotification, UISceneWillDeactivateNotification,
+                                           UIWindowDidResignKeyNotification, GCMouseDidDisconnectNotification])
+            [nc addObserver:self selector:@selector(PointerInterrupted:) name:name object:nil];
         [self KeyboardChanged:nil];
         motion_start();
         phone_motion_start();
@@ -333,6 +348,98 @@ static CGFloat dist(CGPoint a, CGPoint b) { return hypot(a.x - b.x, a.y - b.y); 
 }
 
 // ---- Touch ----
+// Keep indirect clicks away from native dialogs, inactive scenes and text entry.
+- (BOOL)PointerInputAllowed {
+    return self.window.isKeyWindow && UIApplication.sharedApplication.applicationState == UIApplicationStateActive &&
+           self.window.windowScene.activationState == UISceneActivationStateForegroundActive &&
+           !_keyboardEditing && !self.window.rootViewController.presentedViewController;
+}
+
+// Publish only this input source, leaving keyboard, touch and controller state intact.
+- (void)PointerAxes:(int32_t)rightX vertical:(int32_t)rightY {
+    pthread_mutex_lock(&g_mu);
+    BOOL changed = g_pointer_rx != rightX || g_pointer_ry != rightY;
+    g_pointer_rx = rightX; g_pointer_ry = rightY;
+    pthread_mutex_unlock(&g_mu);
+    if (changed) publish();
+}
+
+// Release a pending click or camera gesture without manufacturing a touch-up click.
+- (void)PointerReset {
+    _pointerTouch = nil; PointerDragReset(&_pointerDrag);
+    [_pointerTimer invalidate]; _pointerTimer = nil;
+    [_pointerClicks removeAllObjects];
+    BOOL touching = _pointerClickSlot >= 0;
+    _pointerClickSlot = -1; _pointerClickUntil = _pointerClickGapUntil = 0;
+    [self PointerAxes:0 vertical:0];
+    if (touching) [self pushGame];
+}
+
+// Cancel on loss of this window or scene, or when a pointing device disconnects.
+- (void)PointerInterrupted:(NSNotification *)notification {
+    if (!NSThread.isMainThread) {
+        dispatch_async(dispatch_get_main_queue(), ^{ [self PointerInterrupted:notification]; });
+        return;
+    }
+    if ([notification.name isEqualToString:UIWindowDidResignKeyNotification] && notification.object != self.window) return;
+    if ([notification.name isEqualToString:UISceneWillDeactivateNotification] && notification.object != self.window.windowScene) return;
+    [self PointerReset];
+}
+
+// Keep the click visible to game polling and separate successive clicks by a release.
+- (void)PointerTick:(NSTimer *)timer {
+    if (![self PointerInputAllowed]) { [self PointerReset]; return; }
+    CFTimeInterval timestamp = CACurrentMediaTime();
+    if (_pointerClickSlot >= 0 && timestamp >= _pointerClickUntil) {
+        _pointerClickSlot = -1; _pointerClickGapUntil = timestamp + 1.0 / 60;
+        [self pushGame];
+    }
+    if (_pointerClickSlot < 0 && _pointerClicks.count && timestamp >= _pointerClickGapUntil) {
+        for (int slot = 0; slot < 16; slot++) if (!_game[slot]) {
+            _pointerClickSlot = slot; _pointerClickPosition = _pointerClicks.firstObject.CGPointValue;
+            [_pointerClicks removeObjectAtIndex:0]; _pointerClickUntil = timestamp + 0.08;
+            [self pushGame]; break;
+        }
+    }
+    int32_t rightX, rightY;
+    PointerDragSample(&_pointerDrag, timestamp, &rightX, &rightY);
+    [self PointerAxes:rightX vertical:rightY];
+    if (!_pointerTouch && _pointerClickSlot < 0 && !_pointerClicks.count) {
+        [timer invalidate]; _pointerTimer = nil;
+    }
+}
+
+// Sample movement only while a primary gesture or its deferred click is active.
+- (void)PointerStartTimer {
+    if (_pointerTimer) return;
+    __weak DmGamepad *weakSelf = self;
+    _pointerTimer = [NSTimer timerWithTimeInterval:1.0 / 60 repeats:YES block:^(NSTimer *timer) {
+        DmGamepad *view = weakSelf;
+        if (view) [view PointerTick:timer]; else [timer invalidate];
+    }];
+    [NSRunLoop.mainRunLoop addTimer:_pointerTimer forMode:NSRunLoopCommonModes];
+}
+
+// Match the centred picture used by the Metal front end, excluding letterboxing.
+- (CGRect)GamePicture {
+    CGRect bounds = self.bounds; CGFloat width = bounds.size.width, height = bounds.size.height;
+    if (width / fmax(height, 1) > 16.0 / 9.0) width = height * 16.0 / 9.0; else height = width * 9.0 / 16.0;
+    return CGRectMake(CGRectGetMidX(bounds) - width / 2, CGRectGetMidY(bounds) - height / 2, width, height);
+}
+
+// Commit a released primary click only inside the picture, never over virtual buttons.
+- (void)PointerEnd:(UITouch *)touch cancelled:(BOOL)cancelled {
+    if (touch != _pointerTouch) return;
+    CGPoint position = [touch locationInView:self];
+    if (!cancelled) PointerDragMove(&_pointerDrag, position.x, position.y);
+    BOOL click = PointerDragEnd(&_pointerDrag, cancelled || ![self PointerInputAllowed]);
+    _pointerTouch = nil; [self PointerAxes:0 vertical:0];
+    if (click && CGRectContainsPoint([self GamePicture], position)) {
+        [_pointerClicks addObject:[NSValue valueWithCGPoint:position]];
+        [self PointerStartTimer];
+    }
+}
+
 - (void)recompute {
     uint64_t face = 0; for (UITouch *t in _faceOf) face |= [_faceOf objectForKey:t].unsignedLongLongValue;
     uint64_t btn = 0, dpad = 0; BOOL swap = NO;
@@ -366,24 +473,36 @@ static CGFloat dist(CGPoint a, CGPoint b) { return hypot(a.x - b.x, a.y - b.y); 
 // Touches no control takes (all of them while a physical controller is connected) go to the game's touch screen, normalized on the 16:9 picture that front_ios.m
 // centres in the screen: Super Mario Galaxy's pointer in handheld mode (profile op_mode). The host reports them only in handheld mode, as on the Switch (hle_hid.c touch_read)
 - (void)pushGame {
-    CGRect b = self.bounds; CGFloat w = b.size.width, h = b.size.height;
+    CGRect picture = [self GamePicture]; CGFloat w = picture.size.width, h = picture.size.height;
     if (w <= 0 || h <= 0) return;
-    if (w / h > 16.0 / 9.0) w = h * 16.0 / 9.0; else h = w * 9.0 / 16.0;
-    CGFloat x0 = (b.size.width - w) / 2, y0 = (b.size.height - h) / 2;
+    CGFloat x0 = picture.origin.x, y0 = picture.origin.y;
     dm_touch t[16]; int n = 0;
     for (int i = 0; i < 16; i++) if (_game[i]) {
         CGPoint p = [_game[i] locationInView:self];
         t[n++] = (dm_touch){(uint32_t)i, (float)fmin(fmax((p.x - x0) / w, 0), 0.999), (float)fmin(fmax((p.y - y0) / h, 0), 0.999)};
     }
+    if (_pointerClickSlot >= 0) {
+        CGPoint position = _pointerClickPosition;
+        t[n++] = (dm_touch){(uint32_t)_pointerClickSlot, (float)fmin(fmax((position.x - x0) / w, 0), 0.999),
+                           (float)fmin(fmax((position.y - y0) / h, 0), 0.999)};
+    }
     dm_touch_set(t, n);
 }
 - (BOOL)gameBegin:(UITouch *)t {
-    for (int i = 0; i < 16; i++) if (!_game[i]) { _game[i] = t; [_owner setObject:@(C_GAME | (uint64_t)i << 8) forKey:t]; return YES; }
+    for (int i = 0; i < 16; i++) if (!_game[i] && i != _pointerClickSlot) { _game[i] = t; [_owner setObject:@(C_GAME | (uint64_t)i << 8) forKey:t]; return YES; }
     return NO;
 }
 - (void)touchesBegan:(NSSet<UITouch *> *)ts withEvent:(UIEvent *)e {
     BOOL game = NO;
     for (UITouch *t in ts) {
+        if (t.type == UITouchTypeIndirectPointer) {
+            if (!_pointerTouch && (e.buttonMask & UIEventButtonMaskPrimary) && [self PointerInputAllowed]) {
+                CGPoint position = [t locationInView:self]; _pointerTouch = t;
+                PointerDragBegin(&_pointerDrag, position.x, position.y, CACurrentMediaTime());
+                [self PointerStartTimer];
+            }
+            continue;
+        }
         if (_padOff) { game |= [self gameBegin:t]; continue; }
         CGPoint p = [t locationInView:self]; int hit = _tap ? -1 : [self btnAt:p];
         if (hit >= 0) { [_owner setObject:@(C_BTN | (uint64_t)hit << 8) forKey:t]; continue; }
@@ -406,6 +525,13 @@ static CGFloat dist(CGPoint a, CGPoint b) { return hypot(a.x - b.x, a.y - b.y); 
 - (void)touchesMoved:(NSSet<UITouch *> *)ts withEvent:(UIEvent *)e {
     BOOL game = NO;
     for (UITouch *t in ts) {
+        if (t.type == UITouchTypeIndirectPointer) {
+            if (t == _pointerTouch) {
+                if (!(e.buttonMask & UIEventButtonMaskPrimary) || ![self PointerInputAllowed]) [self PointerReset];
+                else { CGPoint position = [t locationInView:self]; PointerDragMove(&_pointerDrag, position.x, position.y); }
+            }
+            continue;
+        }
         uint64_t v = [_owner objectForKey:t].unsignedLongLongValue; int c = (int)(v & 0xff); CGPoint p = [t locationInView:self];
         if (c == C_FACE) [_faceOf setObject:@([self faceAt:p]) forKey:t];
         else if (c == C_STICK) { _stickNow[v >> 8] = p;
@@ -419,6 +545,7 @@ static CGFloat dist(CGPoint a, CGPoint b) { return hypot(a.x - b.x, a.y - b.y); 
 - (void)endTouches:(NSSet<UITouch *> *)ts tapped:(BOOL)ended {
     BOOL swap = NO, game = NO;
     for (UITouch *t in ts) {
+        if (t.type == UITouchTypeIndirectPointer) { [self PointerEnd:t cancelled:!ended]; continue; }
         uint64_t v = [_owner objectForKey:t].unsignedLongLongValue;
         if (ended && (v & 0xff) == C_SWAP && [self inSwap:[t locationInView:self]]) swap = YES;   // layout button: counts only when released on the button
         if ((v & 0xff) == C_GAME && (v >> 8) < 16) { _game[v >> 8] = nil; game = YES; }
@@ -430,7 +557,13 @@ static CGFloat dist(CGPoint a, CGPoint b) { return hypot(a.x - b.x, a.y - b.y); 
 }
 - (void)touchesEnded:(NSSet<UITouch *> *)ts withEvent:(UIEvent *)e { [self endTouches:ts tapped:YES]; }
 - (void)touchesCancelled:(NSSet<UITouch *> *)ts withEvent:(UIEvent *)e { [self endTouches:ts tapped:NO]; }
-- (void)reset { [_owner removeAllObjects]; [_faceOf removeAllObjects]; _stick[0] = _stick[1] = nil; for (int i = 0; i < 16; i++) _game[i] = nil; [self pushGame]; [self recompute]; }
+- (void)reset { [self PointerReset]; [_owner removeAllObjects]; [_faceOf removeAllObjects]; _stick[0] = _stick[1] = nil; for (int i = 0; i < 16; i++) _game[i] = nil; [self pushGame]; [self recompute]; }
+
+// Removing the overlay must not leave a click or a right stick held in the game.
+- (void)didMoveToWindow {
+    [super didMoveToWindow];
+    if (!self.window) [self PointerReset];
+}
 
 // ---- Shapes ----
 static CGPathRef circlePath(CGPoint c, CGFloat r) { return CGPathCreateWithEllipseInRect(CGRectMake(c.x - r, c.y - r, 2 * r, 2 * r), NULL); }
@@ -464,6 +597,7 @@ static void placeLabel(CATextLayer *t, CGPoint c, CGFloat fs) {
 
 - (void)layoutSubviews {
     [super layoutSubviews];
+    if (!CGRectEqualToRect(_pointerBounds, self.bounds)) { [self PointerReset]; _pointerBounds = self.bounds; }
     UIWindowScene *ws = self.window.windowScene; if (ws) atomic_store(&g_iface_orient, (int)ws.effectiveGeometry.interfaceOrientation);
     CGFloat u = self.u;
     [CATransaction begin]; [CATransaction setDisableActions:YES];
@@ -543,6 +677,7 @@ static void placeLabel(CATextLayer *t, CGPoint c, CGFloat fs) {
     _keyboardEditing = [notification.name isEqualToString:UITextFieldTextDidBeginEditingNotification] ||
                        [notification.name isEqualToString:UITextViewTextDidBeginEditingNotification];
     KeyboardReset();
+    [self PointerReset];
 }
 
 // ---- Physical controllers ----
