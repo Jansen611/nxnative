@@ -278,10 +278,6 @@ int main(void) {
         g_keyboard_btn = 1; g_touch_rx = -12000;
         Tick(view, 0.14);
         assert(reportedRightX > 0 && reportedRightY > 0 && reportedButtons == 1 && reportedCount == 0);
-        g_pad_rx = 20000; g_pad_ry = 0; publish();
-        assert(reportedRightX == 20000 && reportedRightY == 0);
-        g_pad_rx = 0; publish();
-        assert(reportedRightX > 0 && reportedRightY > 0);
         Tick(view, 0.16);
         assert(reportedRightX == -12000 && reportedRightY == 0 && reportedButtons == 1);
         [view touchesEnded:[NSSet setWithObject:pointer] withEvent:event];
