@@ -36,6 +36,7 @@ static pthread_mutex_t g_mu = PTHREAD_MUTEX_INITIALIZER;
 static uint64_t g_touch_btn, g_shake_btn;
 static uint64_t g_keyboard_btn;
 static int g_keyboard_w, g_keyboard_a, g_keyboard_s, g_keyboard_d;
+static int32_t g_keyboard_rx, g_keyboard_ry;
 static int32_t g_touch_lx, g_touch_ly, g_touch_rx, g_touch_ry;
 static int32_t g_pointer_rx, g_pointer_ry;
 static void publish(void) {   // the host merges controllers' separate player paths with the touch, keyboard, pointer and shake (hle_hid.c)
@@ -43,6 +44,7 @@ static void publish(void) {   // the host merges controllers' separate player pa
     int32_t lx = g_touch_lx, ly = g_touch_ly, rx = g_touch_rx, ry = g_touch_ry;
     int32_t keyboardLeft = (g_keyboard_d - g_keyboard_a) * 32767, keyboardUp = (g_keyboard_w - g_keyboard_s) * 32767;
     if (keyboardLeft || keyboardUp) { lx = keyboardLeft; ly = keyboardUp; }
+    if (g_keyboard_rx || g_keyboard_ry) { rx = g_keyboard_rx; ry = g_keyboard_ry; }
     if (g_pointer_rx || g_pointer_ry) { rx = g_pointer_rx; ry = g_pointer_ry; }
     dm_input_set(g_touch_btn | g_shake_btn | g_keyboard_btn, lx, ly, rx, ry);
     pthread_mutex_unlock(&g_mu);
@@ -70,16 +72,77 @@ static uint64_t KeyboardButton(GCKeyCode keyCode) {
     return 0;
 }
 
-// Update only the keyboard's contribution, retaining simultaneous touch and controller input.
+enum { KBD_LLEFT = 1u << 16, KBD_LUP = 1u << 17, KBD_LRIGHT = 1u << 18, KBD_LDOWN = 1u << 19,
+    KBD_RLEFT = 1u << 20, KBD_RUP = 1u << 21, KBD_RRIGHT = 1u << 22, KBD_RDOWN = 1u << 23,
+    KBD_AXES = KBD_LLEFT | KBD_LUP | KBD_LRIGHT | KBD_LDOWN | KBD_RLEFT | KBD_RUP | KBD_RRIGHT | KBD_RDOWN };
+
+// Snapshot supported DM_KEY_* overrides once, after the boot environment is loaded.
+static NSDictionary<NSNumber *, NSNumber *> *KeyboardOverrides(void) {
+    static NSDictionary<NSNumber *, NSNumber *> *overrides;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        NSMutableDictionary<NSString *, NSNumber *> *keyCodes = [@{
+            @"SPACE": @(GCKeyCodeSpacebar), @"RETURN": @(GCKeyCodeReturnOrEnter),
+            @"ESC": @(GCKeyCodeEscape), @"TAB": @(GCKeyCodeTab),
+            @"LEFT": @(GCKeyCodeLeftArrow), @"UP": @(GCKeyCodeUpArrow),
+            @"RIGHT": @(GCKeyCodeRightArrow), @"DOWN": @(GCKeyCodeDownArrow)
+        } mutableCopy];
+        for (GCKeyCode keyCode = GCKeyCodeKeyA; keyCode <= GCKeyCodeKeyZ; keyCode++)
+            keyCodes[[NSString stringWithFormat:@"%c", (int)('A' + keyCode - GCKeyCodeKeyA)]] = @(keyCode);
+        NSDictionary<NSString *, NSNumber *> *actions = @{
+            @"A": @(DM_BTN_A), @"B": @(DM_BTN_B), @"X": @(DM_BTN_X), @"Y": @(DM_BTN_Y),
+            @"L": @(DM_BTN_L), @"R": @(DM_BTN_R), @"ZL": @(DM_BTN_ZL), @"ZR": @(DM_BTN_ZR),
+            @"L3": @(DM_BTN_LS), @"R3": @(DM_BTN_RS), @"LS": @(DM_BTN_LS), @"RS": @(DM_BTN_RS),
+            @"PLUS": @(DM_BTN_PLUS), @"MINUS": @(DM_BTN_MINUS), @"+": @(DM_BTN_PLUS), @"-": @(DM_BTN_MINUS),
+            @"LEFT": @(DM_BTN_LEFT), @"UP": @(DM_BTN_UP), @"RIGHT": @(DM_BTN_RIGHT), @"DOWN": @(DM_BTN_DOWN),
+            @"LLEFT": @(KBD_LLEFT), @"LUP": @(KBD_LUP), @"LRIGHT": @(KBD_LRIGHT), @"LDOWN": @(KBD_LDOWN),
+            @"RLEFT": @(KBD_RLEFT), @"RUP": @(KBD_RUP), @"RRIGHT": @(KBD_RRIGHT), @"RDOWN": @(KBD_RDOWN),
+            @"SHAKE": @(DM_BTN_SHAKE), @"NONE": @0
+        };
+        NSMutableDictionary<NSNumber *, NSNumber *> *configured = [NSMutableDictionary dictionary];
+        for (NSString *keyName in keyCodes) {
+            NSString *environmentName = [@"DM_KEY_" stringByAppendingString:keyName];
+            const char *value = getenv(environmentName.UTF8String);
+            if (!value) continue;
+            NSString *action = [[[NSString stringWithUTF8String:value]
+                                 stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet] uppercaseString];
+            NSNumber *binding = action ? actions[action] : nil;
+            if (binding) configured[keyCodes[keyName]] = binding;
+            else LOG("keyboard: ignoring invalid %s; using the default binding", environmentName.UTF8String);
+        }
+        overrides = [configured copy];
+    });
+    return overrides;
+}
+
+// Replace only explicitly configured keys, including the default WASD stick directions.
+static uint64_t KeyboardBinding(GCKeyCode keyCode) {
+    NSNumber *override = KeyboardOverrides()[@(keyCode)];
+    if (override) return override.unsignedLongLongValue;
+    if (keyCode == GCKeyCodeKeyW) return KBD_LUP;
+    if (keyCode == GCKeyCodeKeyA) return KBD_LLEFT;
+    if (keyCode == GCKeyCodeKeyS) return KBD_LDOWN;
+    if (keyCode == GCKeyCodeKeyD) return KBD_LRIGHT;
+    return KeyboardButton(keyCode);
+}
+
+static NSMutableIndexSet *g_keyboard_keys;
+
+// Aggregate held physical keys so aliases and movement overrides release independently.
 static void KeyboardKey(GCKeyCode keyCode, BOOL pressed) {
-    uint64_t button = KeyboardButton(keyCode);
+    if (!KeyboardBinding(keyCode)) return;
     pthread_mutex_lock(&g_mu);
-    if (keyCode == GCKeyCodeKeyW) g_keyboard_w = pressed;
-    else if (keyCode == GCKeyCodeKeyA) g_keyboard_a = pressed;
-    else if (keyCode == GCKeyCodeKeyS) g_keyboard_s = pressed;
-    else if (keyCode == GCKeyCodeKeyD) g_keyboard_d = pressed;
-    else if (!button) { pthread_mutex_unlock(&g_mu); return; }
-    g_keyboard_btn = pressed ? g_keyboard_btn | button : g_keyboard_btn & ~button;
+    if (!g_keyboard_keys) g_keyboard_keys = [NSMutableIndexSet indexSet];
+    if (pressed) [g_keyboard_keys addIndex:(NSUInteger)keyCode];
+    else [g_keyboard_keys removeIndex:(NSUInteger)keyCode];
+    uint64_t held = 0;
+    for (NSUInteger keyIndex = g_keyboard_keys.firstIndex; keyIndex != NSNotFound; keyIndex = [g_keyboard_keys indexGreaterThanIndex:keyIndex])
+        held |= KeyboardBinding((GCKeyCode)keyIndex);
+    g_keyboard_btn = held & ~(uint64_t)KBD_AXES;
+    g_keyboard_w = (held & KBD_LUP) != 0; g_keyboard_a = (held & KBD_LLEFT) != 0;
+    g_keyboard_s = (held & KBD_LDOWN) != 0; g_keyboard_d = (held & KBD_LRIGHT) != 0;
+    g_keyboard_rx = (((held & KBD_RRIGHT) != 0) - ((held & KBD_RLEFT) != 0)) * 32767;
+    g_keyboard_ry = (((held & KBD_RUP) != 0) - ((held & KBD_RDOWN) != 0)) * 32767;
     pthread_mutex_unlock(&g_mu);
     publish();
 }
@@ -87,7 +150,9 @@ static void KeyboardKey(GCKeyCode keyCode, BOOL pressed) {
 // Release the keyboard without disturbing input owned by another source.
 static void KeyboardReset(void) {
     pthread_mutex_lock(&g_mu);
+    [g_keyboard_keys removeAllIndexes];
     g_keyboard_btn = 0; g_keyboard_w = g_keyboard_a = g_keyboard_s = g_keyboard_d = 0;
+    g_keyboard_rx = g_keyboard_ry = 0;
     pthread_mutex_unlock(&g_mu);
     publish();
 }

@@ -1,3 +1,4 @@
+import os
 import pathlib
 import shutil
 import subprocess
@@ -90,6 +91,198 @@ int main(void) {
             subprocess.run([compiler, '-std=c11', '-Wall', '-Wextra', '-Werror', '-I', str(sourceDirectory),
                             '-x', 'c', '-', '-o', str(executable), '-lm'], input=source, text=True, check=True)
             subprocess.run([str(executable)], check=True)
+
+    # Exercise default, overridden and invalid bindings with Apple's physical key codes.
+    @unittest.skipUnless(sys.platform == 'darwin', 'GameController is required')
+    def test_keyboard_layout(self):
+        compiler = shutil.which('clang')
+        if not compiler:
+            self.skipTest('clang is required')
+        sourceDirectory = pathlib.Path(__file__).resolve().parents[1] / 'Sources'
+        implementation = (sourceDirectory / 'DmGamepad.m').read_text()
+        keyboard = implementation[implementation.index('static pthread_mutex_t g_mu'):implementation.index('// ---- Shaking the phone')]
+        source = r'''
+#import <Foundation/Foundation.h>
+#import <GameController/GameController.h>
+#include <assert.h>
+#include <math.h>
+#include <pthread.h>
+#include <stdio.h>
+#include "dm_input.h"
+#define LOG(...) fprintf(stderr, __VA_ARGS__)
+
+static uint64_t reportedButtons;
+static int32_t reportedLeftX, reportedLeftY, reportedRightX, reportedRightY;
+void dm_input_set(uint64_t buttons, int32_t leftX, int32_t leftY, int32_t rightX, int32_t rightY) {
+    reportedButtons = buttons; reportedLeftX = leftX; reportedLeftY = leftY;
+    reportedRightX = rightX; reportedRightY = rightY;
+}
+KEYBOARD_IMPLEMENTATION
+
+int main(int argc, const char **argv) {
+    @autoreleasepool {
+        assert(argc == 2);
+        BOOL personal = !strcmp(argv[1], "personal"), custom = !strcmp(argv[1], "custom");
+        BOOL rightStick = !strcmp(argv[1], "rightstick");
+        assert(KeyboardButton(GCKeyCodeEscape) == 0);
+        assert(KeyboardButton(GCKeyCodeTab) == DM_BTN_MINUS);
+        assert(KeyboardButton(GCKeyCodeSpacebar) == DM_BTN_SHAKE);
+        assert(KeyboardButton(GCKeyCodeReturnOrEnter) == DM_BTN_PLUS);
+        assert(KeyboardButton(GCKeyCodeKeyL) == 0);
+        GCKeyCode keys[] = {GCKeyCodeKeyJ, GCKeyCodeKeyK, GCKeyCodeKeyU, GCKeyCodeKeyI,
+            GCKeyCodeKeyF, GCKeyCodeKeyG, GCKeyCodeKeyQ, GCKeyCodeKeyE, GCKeyCodeKeyZ, GCKeyCodeKeyC,
+            GCKeyCodeLeftArrow, GCKeyCodeUpArrow, GCKeyCodeRightArrow, GCKeyCodeDownArrow};
+        uint64_t buttons[] = {DM_BTN_A, DM_BTN_B, DM_BTN_X, DM_BTN_Y, DM_BTN_LS, DM_BTN_RS,
+            DM_BTN_L, DM_BTN_R, DM_BTN_ZL, DM_BTN_ZR, DM_BTN_LEFT, DM_BTN_UP, DM_BTN_RIGHT, DM_BTN_DOWN};
+        for (unsigned index = 0; index < sizeof(keys) / sizeof(*keys); index++) assert(KeyboardButton(keys[index]) == buttons[index]);
+
+        if (!personal && !custom && !rightStick) {
+            for (unsigned index = 0; index < sizeof(keys) / sizeof(*keys); index++) assert(KeyboardBinding(keys[index]) == buttons[index]);
+            assert(KeyboardBinding(GCKeyCodeEscape) == 0 && KeyboardBinding(GCKeyCodeKeyL) == 0);
+            KeyboardKey(GCKeyCodeSpacebar, YES); assert(reportedButtons == DM_BTN_SHAKE);
+            KeyboardKey(GCKeyCodeReturnOrEnter, YES); assert(reportedButtons == (DM_BTN_SHAKE | DM_BTN_PLUS));
+            KeyboardReset(); assert(reportedButtons == 0);
+        }
+        if (personal) {
+            assert(KeyboardBinding(GCKeyCodeEscape) == DM_BTN_PLUS);
+            assert(KeyboardBinding(GCKeyCodeReturnOrEnter) == DM_BTN_A);
+            assert(KeyboardBinding(GCKeyCodeKeyI) == DM_BTN_X && KeyboardBinding(GCKeyCodeKeyJ) == DM_BTN_Y);
+            assert(KeyboardBinding(GCKeyCodeKeyK) == DM_BTN_B && KeyboardBinding(GCKeyCodeKeyL) == DM_BTN_A);
+            assert(KeyboardBinding(GCKeyCodeKeyU) == DM_BTN_X && KeyboardBinding(GCKeyCodeKeyF) == DM_BTN_LS && KeyboardBinding(GCKeyCodeKeyG) == DM_BTN_RS);
+            KeyboardKey(GCKeyCodeEscape, YES); KeyboardKey(GCKeyCodeTab, YES);
+            assert(reportedButtons == (DM_BTN_PLUS | DM_BTN_MINUS));
+            KeyboardKey(GCKeyCodeEscape, NO); assert(reportedButtons == DM_BTN_MINUS);
+            KeyboardKey(GCKeyCodeTab, NO); assert(reportedButtons == 0);
+
+            KeyboardKey(GCKeyCodeSpacebar, YES); assert(reportedButtons == DM_BTN_B);
+            KeyboardKey(GCKeyCodeKeyK, YES); KeyboardKey(GCKeyCodeSpacebar, NO);
+            assert(reportedButtons == DM_BTN_B);
+            KeyboardKey(GCKeyCodeKeyK, NO); assert(reportedButtons == 0);
+            KeyboardKey(GCKeyCodeKeyK, YES); KeyboardKey(GCKeyCodeSpacebar, YES);
+            KeyboardKey(GCKeyCodeKeyK, NO); assert(reportedButtons == DM_BTN_B);
+            KeyboardKey(GCKeyCodeSpacebar, NO); assert(reportedButtons == 0);
+
+            KeyboardKey(GCKeyCodeReturnOrEnter, YES); assert(reportedButtons == DM_BTN_A);
+            KeyboardKey(GCKeyCodeKeyL, YES); KeyboardKey(GCKeyCodeReturnOrEnter, NO);
+            assert(reportedButtons == DM_BTN_A);
+            KeyboardKey(GCKeyCodeKeyL, NO); assert(reportedButtons == 0);
+            KeyboardKey(GCKeyCodeKeyL, YES); KeyboardKey(GCKeyCodeReturnOrEnter, YES);
+            KeyboardKey(GCKeyCodeKeyL, NO); assert(reportedButtons == DM_BTN_A);
+            KeyboardKey(GCKeyCodeReturnOrEnter, NO); assert(reportedButtons == 0);
+            KeyboardKey(GCKeyCodeKeyI, YES); KeyboardKey(GCKeyCodeKeyU, YES);
+            KeyboardKey(GCKeyCodeKeyI, NO); assert(reportedButtons == DM_BTN_X);
+            KeyboardKey(GCKeyCodeKeyU, NO); assert(reportedButtons == 0);
+        }
+        if (rightStick) {
+            assert(KeyboardBinding(GCKeyCodeLeftArrow) == KBD_RLEFT);
+            assert(KeyboardBinding(GCKeyCodeRightArrow) == KBD_RRIGHT);
+            assert(KeyboardBinding(GCKeyCodeUpArrow) == KBD_RUP);
+            assert(KeyboardBinding(GCKeyCodeDownArrow) == KBD_RDOWN);
+            KeyboardKey(GCKeyCodeLeftArrow, YES);
+            assert(reportedRightX == -32767 && reportedRightY == 0 && reportedButtons == 0);
+            KeyboardKey(GCKeyCodeRightArrow, YES);
+            assert(reportedRightX == 0 && reportedRightY == 0 && reportedButtons == 0);
+            KeyboardKey(GCKeyCodeLeftArrow, NO); assert(reportedRightX == 32767);
+            KeyboardKey(GCKeyCodeRightArrow, NO); assert(reportedRightX == 0);
+            KeyboardKey(GCKeyCodeUpArrow, YES); assert(reportedRightX == 0 && reportedRightY == 32767);
+            KeyboardKey(GCKeyCodeDownArrow, YES); assert(reportedRightY == 0);
+            KeyboardKey(GCKeyCodeUpArrow, NO); assert(reportedRightY == -32767);
+            KeyboardKey(GCKeyCodeDownArrow, NO); assert(reportedRightY == 0);
+
+            KeyboardKey(GCKeyCodeLeftArrow, YES); KeyboardKey(GCKeyCodeUpArrow, YES);
+            assert(reportedRightX == -32767 && reportedRightY == 32767 && reportedButtons == 0);
+            KeyboardKey(GCKeyCodeLeftArrow, NO); assert(reportedRightX == 0 && reportedRightY == 32767);
+            KeyboardKey(GCKeyCodeUpArrow, NO); assert(reportedRightY == 0);
+            KeyboardKey(GCKeyCodeLeftArrow, YES); KeyboardKey(GCKeyCodeKeyH, YES);
+            KeyboardKey(GCKeyCodeLeftArrow, NO); assert(reportedRightX == -32767);
+            KeyboardKey(GCKeyCodeKeyH, NO); assert(reportedRightX == 0);
+            KeyboardKey(GCKeyCodeKeyH, YES); KeyboardKey(GCKeyCodeKeyH, YES);
+            KeyboardKey(GCKeyCodeKeyH, NO); assert(reportedRightX == 0);
+
+            KeyboardKey(GCKeyCodeKeyW, YES); KeyboardKey(GCKeyCodeKeyA, YES);
+            assert(reportedLeftX == -32767 && reportedLeftY == 0 && reportedRightY == 32767 && reportedButtons == 0);
+            KeyboardKey(GCKeyCodeKeyW, NO); assert(reportedLeftX == -32767 && reportedRightY == 0);
+            KeyboardKey(GCKeyCodeKeyA, NO); assert(reportedLeftX == 0);
+
+            g_touch_rx = 9000; g_touch_ry = -5000;
+            KeyboardKey(GCKeyCodeRightArrow, YES); assert(reportedRightX == 32767 && reportedRightY == 0);
+            g_pointer_rx = -11000; g_pointer_ry = 5000; publish();
+            assert(reportedRightX == -11000 && reportedRightY == 5000);
+            g_pointer_rx = g_pointer_ry = 0; publish();
+            assert(reportedRightX == 32767 && reportedRightY == 0);
+            KeyboardKey(GCKeyCodeRightArrow, NO); assert(reportedRightX == 9000 && reportedRightY == -5000);
+            KeyboardKey(GCKeyCodeRightArrow, YES); g_pointer_rx = -11000; g_pointer_ry = 5000;
+            KeyboardReset(); assert(reportedRightX == -11000 && reportedRightY == 5000);
+            g_pointer_rx = g_pointer_ry = 0; publish();
+            assert(reportedRightX == 9000 && reportedRightY == -5000);
+            g_touch_rx = g_touch_ry = 0; publish(); assert(reportedRightX == 0 && reportedRightY == 0);
+            KeyboardKey(GCKeyCodeLeftArrow, YES); KeyboardKey(GCKeyCodeUpArrow, YES);
+            KeyboardReset(); assert(reportedRightX == 0 && reportedRightY == 0 && reportedButtons == 0);
+            KeyboardKey(GCKeyCodeLeftArrow, NO); KeyboardKey(GCKeyCodeUpArrow, NO);
+            assert(reportedRightX == 0 && reportedRightY == 0);
+        }
+        KeyboardKey(GCKeyCodeKeyK, YES); KeyboardKey(GCKeyCodeKeyK, YES);
+        KeyboardKey(GCKeyCodeKeyK, NO); assert(reportedButtons == 0);
+
+        if (!custom && !rightStick) {
+            KeyboardKey(GCKeyCodeKeyW, YES); KeyboardKey(GCKeyCodeKeyD, YES);
+            assert(reportedLeftX == 32767 && reportedLeftY == 32767);
+            KeyboardKey(GCKeyCodeKeyS, YES); KeyboardKey(GCKeyCodeKeyA, YES);
+            assert(reportedLeftX == 0 && reportedLeftY == 0);
+        } else if (custom) {
+            assert(KeyboardBinding(GCKeyCodeSpacebar) == 0 && KeyboardBinding(GCKeyCodeKeyA) == 0);
+            assert(KeyboardBinding(GCKeyCodeKeyF) == DM_BTN_RS && KeyboardBinding(GCKeyCodeKeyG) == DM_BTN_LS);
+            KeyboardKey(GCKeyCodeSpacebar, YES); assert(reportedButtons == 0);
+            KeyboardKey(GCKeyCodeKeyW, YES); KeyboardKey(GCKeyCodeKeyA, YES);
+            assert(reportedButtons == DM_BTN_B && reportedLeftX == 0);
+            KeyboardKey(GCKeyCodeKeyT, YES); KeyboardKey(GCKeyCodeKeyJ, YES);
+            assert(reportedButtons == DM_BTN_B && reportedLeftX == -32767 && reportedLeftY == 32767);
+            KeyboardKey(GCKeyCodeKeyK, YES); assert(reportedButtons == (DM_BTN_B | DM_BTN_RIGHT));
+            KeyboardKey(GCKeyCodeKeyR, YES); assert(reportedButtons == (DM_BTN_B | DM_BTN_RIGHT | DM_BTN_SHAKE));
+        }
+        KeyboardReset(); assert(reportedButtons == 0 && reportedLeftX == 0 && reportedLeftY == 0 && reportedRightX == 0 && reportedRightY == 0);
+
+        g_touch_btn = DM_BTN_Y; g_shake_btn = DM_BTN_SHAKE; g_pointer_rx = 12000;
+        KeyboardKey(GCKeyCodeKeyQ, YES);
+        assert(reportedButtons == (DM_BTN_Y | DM_BTN_SHAKE | DM_BTN_L));
+        assert(reportedRightX == 12000 && reportedRightY == 0);
+        KeyboardReset(); assert(reportedButtons == (DM_BTN_Y | DM_BTN_SHAKE));
+        assert(reportedRightX == 12000);
+        g_touch_btn = g_shake_btn = 0; g_pointer_rx = 0;
+        KeyboardKey(GCKeyCodeKeyQ, YES); assert(reportedButtons == DM_BTN_L);
+        KeyboardKey(GCKeyCodeKeyW, NO); assert(reportedButtons == DM_BTN_L);
+        KeyboardReset(); assert(reportedButtons == 0);
+        uint64_t cached = KeyboardBinding(GCKeyCodeReturnOrEnter);
+        assert(setenv("DM_KEY_RETURN", "NONE", 1) == 0);
+        assert(KeyboardBinding(GCKeyCodeReturnOrEnter) == cached);
+    }
+    return 0;
+}
+'''.replace('KEYBOARD_IMPLEMENTATION', keyboard)
+        with tempfile.TemporaryDirectory(prefix='personal keyboard ') as temporary:
+            executable = pathlib.Path(temporary) / 'keyboard-check'
+            subprocess.run([compiler, '-fobjc-arc', '-Wall', '-Wextra', '-Werror', '-I', str(sourceDirectory.parents[1] / 'host'),
+                            '-x', 'objective-c', '-', '-framework', 'Foundation', '-framework', 'GameController',
+                            '-o', str(executable)], input=source, text=True, check=True)
+            baseEnvironment = {name: value for name, value in os.environ.items() if not name.startswith('DM_KEY_')}
+            cases = {
+                'default': {},
+                'personal': {'DM_KEY_ESC': 'PLUS', 'DM_KEY_TAB': 'MINUS', 'DM_KEY_SPACE': 'B', 'DM_KEY_RETURN': 'A',
+                             'DM_KEY_I': 'X', 'DM_KEY_J': 'Y', 'DM_KEY_K': 'B', 'DM_KEY_L': 'A'},
+                'custom': {'DM_KEY_W': ' b ', 'DM_KEY_A': 'NONE', 'DM_KEY_SPACE': 'none', 'DM_KEY_T': 'LUP',
+                           'DM_KEY_J': 'LLEFT', 'DM_KEY_K': 'RIGHT', 'DM_KEY_F': 'R3', 'DM_KEY_G': 'L3', 'DM_KEY_R': 'SHAKE'},
+                'rightstick': {'DM_KEY_LEFT': 'RLEFT', 'DM_KEY_RIGHT': 'RRIGHT', 'DM_KEY_UP': ' rup ',
+                               'DM_KEY_DOWN': 'RDOWN', 'DM_KEY_H': 'RLEFT', 'DM_KEY_W': 'RUP'},
+                'invalid': {'DM_KEY_SPACE': 'not-a-button', 'DM_KEY_RETURN': '', 'DM_KEY_W': 'bad-direction',
+                            'DM_KEY_H': 'RDIAGONAL'},
+            }
+            for mode, overrides in cases.items():
+                with self.subTest(mode=mode):
+                    result = subprocess.run([str(executable), mode], env={**baseEnvironment, **overrides}, capture_output=True, text=True)
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    if mode == 'invalid':
+                        for name in overrides:
+                            self.assertEqual(result.stderr.count(name), 1, result.stderr)
 
     # Exercise production touch routing with Foundation doubles, not a second implementation.
     @unittest.skipUnless(sys.platform == 'darwin', 'Foundation is required')
