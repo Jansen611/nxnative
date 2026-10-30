@@ -70,7 +70,7 @@
 #   not reached), REGRESSION (new [RED] lines, a screenshot beyond the tolerance, frame time, memory or prepare time worse beyond it), CHANGED (MSL or numbers differ, nothing worse),
 #   PASS. "known" lists failures the baseline has too (they do not fail the check).
 # Exit status: 0 = no regression, 1 = a regression (NEW-FAIL or REGRESSION) in some game, 2 = a harness error (and no regression found).
-import argparse, collections, concurrent.futures as cf, ctypes, datetime, hashlib, importlib.util, json, os, re, shutil, signal, struct, subprocess, sys, time, traceback
+import argparse, collections, concurrent.futures as cf, ctypes, datetime, fcntl, hashlib, importlib.util, json, os, re, shutil, signal, struct, subprocess, sys, time, traceback
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
@@ -355,9 +355,18 @@ def chain_key(tree, g, tools):
 
 def chain_build(tree, g, a):
     """The game's shaders built into its NSP work folder's regress/chain/<key>/ (reused when its manifest is there): → manifest"""
-    tools, jobs = a.tools_fp, a.jobs
-    v, inp, key = chain_key(tree, g, tools)
+    v, inp, key = chain_key(tree, g, a.tools_fp)
     out = game_root(g) / 'chain' / key
+    out.parent.mkdir(parents=True, exist_ok=True)
+    with open(out.parent / f'{key}.lock', 'w') as lk:   # one build per chain key: another regress.py building the same one (another session, the same game) is waited for, then reused
+        try: fcntl.flock(lk, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            say(f'  {g.id}: another process is building chain {key}: waiting for it'); fcntl.flock(lk, fcntl.LOCK_EX)
+        return chain_build_locked(tree, g, a, v, inp, key, out)
+
+
+def chain_build_locked(tree, g, a, v, inp, key, out):
+    jobs = a.jobs
     mf = out / 'manifest.json'
     if mf.is_file():
         m = json.loads(mf.read_text()); m['secs'] = 0
@@ -821,7 +830,7 @@ def run_env(g, art, route, outdir, a):
     else: save.mkdir()
     temp.mkdir()
     env = dict(os.environ, DM_ROOT=str(g.build), DM_ROMFS=str(g.romfs()), DM_SAVE=str(save), DM_TEMP=str(temp), DM_MSL_DIR=str(lib), DM_FONT_DIR=str(g.build / 'font'),
-               DM_WINDOW='1', DM_AUDIO='0', DM_METAL_HUD='0' if a.no_hud else '1', DM_CTL=str(outdir / 'ctl'), TMPDIR=str(game_root(g) / 'tmp') + '/')
+               DM_WINDOW='1', DM_WINDOW_TOP='1', DM_AUDIO='0', DM_METAL_HUD='0' if a.no_hud else '1', DM_CTL=str(outdir / 'ctl'), TMPDIR=str(game_root(g) / 'tmp') + '/')
     if g.kind == 'nvn':
         env.update(DM_NVN_SHMAP=str(prof / 'shader_map.tsv'), DM_NVN_TSV=str(outdir / 'frames.tsv'), DM_NVN_TSV_CALLS='0')
         if not (prof / 'pso_pairs.tsv').is_file() and (g.build / 'shader/pso_pairs.tsv').is_file(): env['DM_PSO_PAIRS'] = str(g.build / 'shader/pso_pairs.tsv')
@@ -851,7 +860,7 @@ def smoke_run(g, tree, art, route, quick, outdir, a):
     text = (outdir / 'log.txt').read_text(errors='replace')
     red, crash_line, prep, _ = read_log(text)
     res.update(exit=r['exit'], hang_at_s=r['hang_at_s'], hang_sample=r['hang_sample'], hang_dump='state dump (DM_CTL dump)' in text, first_frame_s=r['first_frame_s'], max_frame=r['max_frame'], peak_footprint_mb=r['peak_mb'], busy=r['busy'],
-               prepare_s=prep, red=dict(red), crash=None)
+               prepare_s=prep, red=dict(red), crash=None, covered=text.count('front end: window covered'))
     if crash_line or (r['exit'] not in (None, 0)):
         res['crash'] = {'line': normalize_red('[RED] ' + crash_line) if crash_line else None, **(crash_report(r['t0']) or {})}
     if route['reach']:
@@ -1079,9 +1088,13 @@ def smoke_series(g, tree, art, route, quick, label, a, runs):
     for i in range(runs):
         d = game_root(g) / 'runs' / f'{datetime.datetime.now():%Y%m%d-%H%M%S}-{label}-{"quick" if quick else "full"}-{i + 1}'
         say(f'  {g.id}: {label} run {i + 1}/{runs} ({"quick" if quick else "full"}, {route["quick"] if quick else route["secs"]:g} s) → {d}')
-        r = smoke_run(g, tree, art, route, quick, d, a); r['dir'] = str(d); out.append(r)
+        r = smoke_run(g, tree, art, route, quick, d, a); r['dir'] = str(d)
+        if r.get('covered'):   # another window covered the game's (a covered window's display link fires about once a second): its frame times measure nothing, so once more
+            say(f'    the window was covered during the run ({d / "log.txt"}): once more')
+            d = d.with_name(d.name + '-again'); r = smoke_run(g, tree, art, route, quick, d, a); r['dir'] = str(d)
+        out.append(r)
         say(f'    exit {r["exit"]}, max frame {r["max_frame"]}, first frame {r["first_frame_s"]} s, prepare {r["prepare_s"]} s, fps {r.get("fps")}, p99 {r.get("frame_p99")} ms, '
-            f'peak {r["peak_footprint_mb"]} MB, RED kinds {len(r["red"])}' + (f', prebuild {r["prebuild"].get("wall_s")} s' if r.get('prebuild') else '')
+            f'peak {r["peak_footprint_mb"]} MB, RED kinds {len(r["red"])}' + (', window covered' if r.get('covered') else '') + (f', prebuild {r["prebuild"].get("wall_s")} s' if r.get('prebuild') else '')
             + (f', FAIL: {"; ".join(run_failures(r, route))}' if run_failures(r, route) else '')
             + ''.join(f', thread stacks {d / x}' for x in (r.get('hang_sample'), (r.get('prebuild') or {}).get('hang_sample')) if x))
     return out
@@ -1202,6 +1215,7 @@ def replayer_for(tree, g, a):
     if dst.is_file(): return dst
     say(f'  {g.id}: building the replayer of {tree.id}')
     logs = game_root(g) / 'tmp'; logs.mkdir(parents=True, exist_ok=True); env = g.env(tree)
+    (tree.path / 'dm/gfx/tests/nvn_replay').unlink(missing_ok=True)   # one binary per tree but one header per game: make would keep another game's binary, newer than this game's header
     for d, target in (('dm/host', 'game_profile'), ('dm/gfx/tests', 'nvn_replay')):   # the profile header first: the tests' rule keeps a stale one
         log = logs / f'replayer-{tree.id}-{g.id}-{target}.log'
         rc, _ = run_heavy(['make', '-C', tree.path / d, f'GAME={g.id}', target], log, tree.path, env, a, f'{g.id} {target}')
@@ -1305,7 +1319,9 @@ def cmd_capture(a):
             # the wall clock (DM_DETCLOCK stops some games, waiting for guest time); no pipeline prebuild, and no stand-in pipelines, whose draws would differ from the replay's
             env.update(DM_KEYS=route['keys'], DM_PSO_PREBUILD='0', DM_PSO_HYBRID='0', DM_NVN_CAPTURE=f'{frame}:1:{cap}')
             say(f'  {g.id}: capturing frame {frame} with {tree.id} → {cap}')
-            r = run_watched([art['host'], art['modules']], env, outdir, outdir / 'log.txt', a, limit=a.capture_limit, hang=max(route['hang'], 300), kind='nvn',
+            # the capture step itself shows no frame until it ends (reading back the textures and compressing the pools: about 2 minutes for Breath of the Wild), so only the
+            # capture limit bounds it
+            r = run_watched([art['host'], art['modules']], env, outdir, outdir / 'log.txt', a, limit=a.capture_limit, hang=max(route['hang'], a.capture_limit), kind='nvn',
                             what=f'{g.id} capture', frames=outdir / 'frames.tsv', until=r'DM_NVN_CAPTURE: frame \d+: [^\n]*')
             if not r['until'] or not cap.is_file():
                 raise HarnessError(f'frame {frame} was not captured within {a.capture_limit:g} s (the game reached frame {r["max_frame"]}; see {outdir / "log.txt"})')
@@ -1497,7 +1513,7 @@ def report_md(rep):
                 pb = r.get('prebuild') or {}
                 L.append(f"  - {label}: exit {r.get('exit')}, first frame {r.get('first_frame_s')} s, max frame {r.get('max_frame')}, reached {r.get('reached')}, prepare {r.get('prepare_s')} s"
                          + (f", prebuild {pb.get('wall_s')} s ({pb.get('built', 0):g} built, {pb.get('failed', 0):g} failed)" if pb else '')
-                         + f", fps {r.get('fps')}, p50/p99 {r.get('frame_p50')}/{r.get('frame_p99')} ms, peak {r.get('peak_footprint_mb')} MB" + (', busy Mac' if r.get('busy') else '')
+                         + f", fps {r.get('fps')}, p50/p99 {r.get('frame_p50')}/{r.get('frame_p99')} ms, peak {r.get('peak_footprint_mb')} MB" + (', busy Mac' if r.get('busy') else '') + (', window covered' if r.get('covered') else '')
                          + (f", missing shader libraries {red_counts(r)[MISSING_LIB]}" if red_counts(r)[MISSING_LIB] else '')
                          + (', hang: state dump in log.txt' if r.get('hang_dump') else '') + (f", thread stacks {r['hang_sample']}" if r.get('hang_sample') else ''))
         rp = g.get('replay')
@@ -1554,7 +1570,7 @@ def main():
     p = sub.add_parser('chain', help='the static checks only'); p.add_argument('--baseline'); p.add_argument('--candidate', default='worktree'); common(p, smoke=False)
     p = sub.add_parser('capture', help='capture one frame per game (the route\'s capture frame) and measure its replay noise'); p.add_argument('--rev', default='main')
     p.add_argument('--repeat', type=int, default=8, help='fresh replays that measure the capture\'s noise (default 8)')
-    p.add_argument('--capture-limit', type=float, default=300, help='seconds the game may take to reach the frame and write it (default 300)'); common(p)
+    p.add_argument('--capture-limit', type=float, default=600, help='seconds the game may take to reach the frame and write it (default 600: a covered window runs at a third of the rate)'); common(p)
     p = sub.add_parser('replay', help='replay each game\'s capture against a baseline and a candidate'); p.add_argument('--baseline'); p.add_argument('--candidate', default='worktree')
     p.add_argument('--repeat', type=int, default=3, help='fresh replays per revision (default 3)')
     p.add_argument('--wait-idle', type=float, default=900, help='seconds to wait for other builds to end before replaying (default 900)'); common(p, smoke=False)
