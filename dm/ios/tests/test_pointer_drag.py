@@ -124,11 +124,18 @@ int main(int argc, const char **argv) {
         assert(argc == 2);
         BOOL personal = !strcmp(argv[1], "personal"), custom = !strcmp(argv[1], "custom");
         BOOL rightStick = !strcmp(argv[1], "rightstick");
+        BOOL punctuation = !strcmp(argv[1], "punctuation");
         assert(KeyboardButton(GCKeyCodeEscape) == 0);
         assert(KeyboardButton(GCKeyCodeTab) == DM_BTN_MINUS);
         assert(KeyboardButton(GCKeyCodeSpacebar) == DM_BTN_SHAKE);
         assert(KeyboardButton(GCKeyCodeReturnOrEnter) == DM_BTN_PLUS);
         assert(KeyboardButton(GCKeyCodeKeyL) == 0);
+        assert(KeyboardButton(GCKeyCodeHyphen) == 0 && KeyboardButton(GCKeyCodeEqualSign) == 0);
+        GCKeyCode punctuationKeys[] = {GCKeyCodeOpenBracket, GCKeyCodeCloseBracket, GCKeyCodeSemicolon, GCKeyCodeQuote};
+        for (unsigned index = 0; index < sizeof(punctuationKeys) / sizeof(*punctuationKeys); index++) {
+            assert(KeyboardButton(punctuationKeys[index]) == 0);
+            if (!punctuation && !custom) assert(KeyboardBinding(punctuationKeys[index]) == 0);
+        }
         GCKeyCode keys[] = {GCKeyCodeKeyJ, GCKeyCodeKeyK, GCKeyCodeKeyU, GCKeyCodeKeyI,
             GCKeyCodeKeyF, GCKeyCodeKeyG, GCKeyCodeKeyQ, GCKeyCodeKeyE, GCKeyCodeKeyZ, GCKeyCodeKeyC,
             GCKeyCodeLeftArrow, GCKeyCodeUpArrow, GCKeyCodeRightArrow, GCKeyCodeDownArrow};
@@ -136,6 +143,9 @@ int main(int argc, const char **argv) {
             DM_BTN_L, DM_BTN_R, DM_BTN_ZL, DM_BTN_ZR, DM_BTN_LEFT, DM_BTN_UP, DM_BTN_RIGHT, DM_BTN_DOWN};
         for (unsigned index = 0; index < sizeof(keys) / sizeof(*keys); index++) assert(KeyboardButton(keys[index]) == buttons[index]);
 
+        if (!personal && !custom && !punctuation) {
+            assert(KeyboardBinding(GCKeyCodeHyphen) == 0 && KeyboardBinding(GCKeyCodeEqualSign) == 0);
+        }
         if (!personal && !custom && !rightStick) {
             for (unsigned index = 0; index < sizeof(keys) / sizeof(*keys); index++) assert(KeyboardBinding(keys[index]) == buttons[index]);
             assert(KeyboardBinding(GCKeyCodeEscape) == 0 && KeyboardBinding(GCKeyCodeKeyL) == 0);
@@ -144,6 +154,24 @@ int main(int argc, const char **argv) {
             KeyboardReset(); assert(reportedButtons == 0);
         }
         if (personal) {
+            assert(KeyboardBinding(GCKeyCodeHyphen) == DM_BTN_MINUS);
+            assert(KeyboardBinding(GCKeyCodeEqualSign) == DM_BTN_PLUS);
+            KeyboardKey(GCKeyCodeHyphen, YES); KeyboardKey(GCKeyCodeEqualSign, YES);
+            assert(reportedButtons == (DM_BTN_MINUS | DM_BTN_PLUS));
+            KeyboardKey(GCKeyCodeEqualSign, NO); assert(reportedButtons == DM_BTN_MINUS);
+            KeyboardKey(GCKeyCodeHyphen, NO); assert(reportedButtons == 0);
+            KeyboardKey(GCKeyCodeHyphen, YES); KeyboardKey(GCKeyCodeTab, YES);
+            KeyboardKey(GCKeyCodeHyphen, NO); assert(reportedButtons == DM_BTN_MINUS);
+            KeyboardKey(GCKeyCodeTab, NO); assert(reportedButtons == 0);
+            KeyboardKey(GCKeyCodeTab, YES); KeyboardKey(GCKeyCodeHyphen, YES);
+            KeyboardKey(GCKeyCodeTab, NO); assert(reportedButtons == DM_BTN_MINUS);
+            KeyboardKey(GCKeyCodeHyphen, NO); assert(reportedButtons == 0);
+            KeyboardKey(GCKeyCodeEqualSign, YES); KeyboardKey(GCKeyCodeEscape, YES);
+            KeyboardKey(GCKeyCodeEqualSign, NO); assert(reportedButtons == DM_BTN_PLUS);
+            KeyboardKey(GCKeyCodeEscape, NO); assert(reportedButtons == 0);
+            KeyboardKey(GCKeyCodeEscape, YES); KeyboardKey(GCKeyCodeEqualSign, YES);
+            KeyboardKey(GCKeyCodeEscape, NO); assert(reportedButtons == DM_BTN_PLUS);
+            KeyboardKey(GCKeyCodeEqualSign, NO); assert(reportedButtons == 0);
             assert(KeyboardBinding(GCKeyCodeEscape) == DM_BTN_PLUS);
             assert(KeyboardBinding(GCKeyCodeReturnOrEnter) == DM_BTN_A);
             assert(KeyboardBinding(GCKeyCodeKeyI) == DM_BTN_X && KeyboardBinding(GCKeyCodeKeyJ) == DM_BTN_Y);
@@ -172,6 +200,40 @@ int main(int argc, const char **argv) {
             KeyboardKey(GCKeyCodeKeyI, YES); KeyboardKey(GCKeyCodeKeyU, YES);
             KeyboardKey(GCKeyCodeKeyI, NO); assert(reportedButtons == DM_BTN_X);
             KeyboardKey(GCKeyCodeKeyU, NO); assert(reportedButtons == 0);
+        }
+        if (punctuation) {
+            GCKeyCode symbols[] = {GCKeyCodeHyphen, GCKeyCodeEqualSign, GCKeyCodeOpenBracket,
+                GCKeyCodeCloseBracket, GCKeyCodeSemicolon, GCKeyCodeQuote};
+            uint64_t symbolActions[] = {DM_BTN_MINUS, DM_BTN_PLUS, DM_BTN_L, DM_BTN_R, DM_BTN_ZL, DM_BTN_ZR};
+            unsigned count = sizeof(symbols) / sizeof(*symbols);
+            for (unsigned index = 0; index < count; index++) {
+                assert(KeyboardBinding(symbols[index]) == symbolActions[index]);
+                KeyboardKey(symbols[index], YES); assert(reportedButtons == symbolActions[index]);
+                KeyboardKey(symbols[index], YES); assert(reportedButtons == symbolActions[index]);
+                KeyboardKey(symbols[index], NO); assert(reportedButtons == 0);
+            }
+            uint64_t combined = 0;
+            for (unsigned index = 0; index < count; index++) {
+                KeyboardKey(symbols[index], YES); combined |= symbolActions[index];
+                assert(reportedButtons == combined);
+            }
+            for (unsigned index = 0; index < count; index++) {
+                KeyboardKey(symbols[index], NO); combined &= ~symbolActions[index];
+                assert(reportedButtons == combined);
+            }
+            GCKeyCode aliases[] = {GCKeyCodeKeyQ, GCKeyCodeKeyE, GCKeyCodeKeyZ, GCKeyCodeKeyC};
+            for (unsigned index = 0; index < sizeof(aliases) / sizeof(*aliases); index++) {
+                KeyboardKey(punctuationKeys[index], YES); KeyboardKey(aliases[index], YES);
+                KeyboardKey(punctuationKeys[index], NO); assert(reportedButtons == symbolActions[index + 2]);
+                KeyboardKey(aliases[index], NO); assert(reportedButtons == 0);
+                KeyboardKey(aliases[index], YES); KeyboardKey(punctuationKeys[index], YES);
+                KeyboardKey(aliases[index], NO); assert(reportedButtons == symbolActions[index + 2]);
+                KeyboardKey(punctuationKeys[index], NO); assert(reportedButtons == 0);
+            }
+            for (unsigned index = 0; index < count; index++) KeyboardKey(symbols[index], YES);
+            KeyboardReset(); assert(reportedButtons == 0);
+            for (unsigned index = 0; index < count; index++) KeyboardKey(symbols[index], NO);
+            assert(reportedButtons == 0);
         }
         if (rightStick) {
             assert(KeyboardBinding(GCKeyCodeLeftArrow) == KBD_RLEFT);
@@ -230,6 +292,18 @@ int main(int argc, const char **argv) {
             KeyboardKey(GCKeyCodeKeyS, YES); KeyboardKey(GCKeyCodeKeyA, YES);
             assert(reportedLeftX == 0 && reportedLeftY == 0);
         } else if (custom) {
+            assert(KeyboardBinding(GCKeyCodeOpenBracket) == DM_BTN_Y && KeyboardBinding(GCKeyCodeCloseBracket) == 0);
+            assert(KeyboardBinding(GCKeyCodeSemicolon) == KBD_LUP && KeyboardBinding(GCKeyCodeQuote) == KBD_RRIGHT);
+            KeyboardKey(GCKeyCodeOpenBracket, YES); KeyboardKey(GCKeyCodeCloseBracket, YES);
+            assert(reportedButtons == DM_BTN_Y);
+            KeyboardKey(GCKeyCodeOpenBracket, NO); KeyboardKey(GCKeyCodeCloseBracket, NO); assert(reportedButtons == 0);
+            KeyboardKey(GCKeyCodeSemicolon, YES); KeyboardKey(GCKeyCodeQuote, YES);
+            assert(reportedButtons == 0 && reportedLeftY == 32767 && reportedRightX == 32767);
+            KeyboardReset(); assert(reportedLeftY == 0 && reportedRightX == 0);
+            assert(KeyboardBinding(GCKeyCodeHyphen) == DM_BTN_A && KeyboardBinding(GCKeyCodeEqualSign) == 0);
+            KeyboardKey(GCKeyCodeHyphen, YES); KeyboardKey(GCKeyCodeEqualSign, YES);
+            assert(reportedButtons == DM_BTN_A);
+            KeyboardKey(GCKeyCodeHyphen, NO); KeyboardKey(GCKeyCodeEqualSign, NO); assert(reportedButtons == 0);
             assert(KeyboardBinding(GCKeyCodeSpacebar) == 0 && KeyboardBinding(GCKeyCodeKeyA) == 0);
             assert(KeyboardBinding(GCKeyCodeKeyF) == DM_BTN_RS && KeyboardBinding(GCKeyCodeKeyG) == DM_BTN_LS);
             KeyboardKey(GCKeyCodeSpacebar, YES); assert(reportedButtons == 0);
@@ -268,13 +342,22 @@ int main(int argc, const char **argv) {
             cases = {
                 'default': {},
                 'personal': {'DM_KEY_ESC': 'PLUS', 'DM_KEY_TAB': 'MINUS', 'DM_KEY_SPACE': 'B', 'DM_KEY_RETURN': 'A',
-                             'DM_KEY_I': 'X', 'DM_KEY_J': 'Y', 'DM_KEY_K': 'B', 'DM_KEY_L': 'A'},
+                                                         'DM_KEY_I': 'X', 'DM_KEY_J': 'Y', 'DM_KEY_K': 'B', 'DM_KEY_L': 'A',
+                                                         'DM_KEY_MINUS': 'MINUS', 'DM_KEY_EQUALS': 'PLUS'},
                 'custom': {'DM_KEY_W': ' b ', 'DM_KEY_A': 'NONE', 'DM_KEY_SPACE': 'none', 'DM_KEY_T': 'LUP',
-                           'DM_KEY_J': 'LLEFT', 'DM_KEY_K': 'RIGHT', 'DM_KEY_F': 'R3', 'DM_KEY_G': 'L3', 'DM_KEY_R': 'SHAKE'},
+                                                     'DM_KEY_J': 'LLEFT', 'DM_KEY_K': 'RIGHT', 'DM_KEY_F': 'R3', 'DM_KEY_G': 'L3', 'DM_KEY_R': 'SHAKE',
+                                                     'DM_KEY_MINUS': ' a ', 'DM_KEY_EQUALS': 'NONE',
+                                                     'DM_KEY_LEFTBRACKET': 'Y', 'DM_KEY_RIGHTBRACKET': 'NONE',
+                                                     'DM_KEY_SEMICOLON': 'LUP', 'DM_KEY_APOSTROPHE': 'RRIGHT'},
+                'punctuation': {'DM_KEY_MINUS': 'MINUS', 'DM_KEY_EQUALS': 'PLUS',
+                                'DM_KEY_LEFTBRACKET': 'L', 'DM_KEY_RIGHTBRACKET': 'R',
+                                'DM_KEY_SEMICOLON': 'ZL', 'DM_KEY_APOSTROPHE': 'ZR'},
                 'rightstick': {'DM_KEY_LEFT': 'RLEFT', 'DM_KEY_RIGHT': 'RRIGHT', 'DM_KEY_UP': ' rup ',
                                'DM_KEY_DOWN': 'RDOWN', 'DM_KEY_H': 'RLEFT', 'DM_KEY_W': 'RUP'},
                 'invalid': {'DM_KEY_SPACE': 'not-a-button', 'DM_KEY_RETURN': '', 'DM_KEY_W': 'bad-direction',
-                            'DM_KEY_H': 'RDIAGONAL'},
+                            'DM_KEY_H': 'RDIAGONAL', 'DM_KEY_MINUS': 'bad-button', 'DM_KEY_EQUALS': '',
+                            'DM_KEY_LEFTBRACKET': 'bad-button', 'DM_KEY_RIGHTBRACKET': '',
+                            'DM_KEY_SEMICOLON': 'bad-direction', 'DM_KEY_APOSTROPHE': 'bad-direction'},
             }
             for mode, overrides in cases.items():
                 with self.subTest(mode=mode):

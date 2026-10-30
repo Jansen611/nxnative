@@ -84,6 +84,9 @@ static NSDictionary<NSNumber *, NSNumber *> *KeyboardOverrides(void) {
         NSMutableDictionary<NSString *, NSNumber *> *keyCodes = [@{
             @"SPACE": @(GCKeyCodeSpacebar), @"RETURN": @(GCKeyCodeReturnOrEnter),
             @"ESC": @(GCKeyCodeEscape), @"TAB": @(GCKeyCodeTab),
+            @"MINUS": @(GCKeyCodeHyphen), @"EQUALS": @(GCKeyCodeEqualSign),
+            @"LEFTBRACKET": @(GCKeyCodeOpenBracket), @"RIGHTBRACKET": @(GCKeyCodeCloseBracket),
+            @"SEMICOLON": @(GCKeyCodeSemicolon), @"APOSTROPHE": @(GCKeyCodeQuote),
             @"LEFT": @(GCKeyCodeLeftArrow), @"UP": @(GCKeyCodeUpArrow),
             @"RIGHT": @(GCKeyCodeRightArrow), @"DOWN": @(GCKeyCodeDownArrow)
         } mutableCopy];
