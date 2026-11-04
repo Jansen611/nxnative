@@ -378,12 +378,17 @@ int main(int argc, const char **argv) {
         publish = implementation[implementation.index('static pthread_mutex_t g_mu'):implementation.index('// Map physical key')]
         pointer = implementation[implementation.index('// Keep indirect clicks'):implementation.index('- (void)recompute')]
         touches = implementation[implementation.index('- (void)pushGame {'):implementation.index('// Removing the overlay')]
+        layout = (sourceDirectory / 'DmLayout.h').read_text()
+        layoutDefinition = layout[layout.index('typedef struct'):layout.index('\n\nstatic inline UIEdgeInsets')]
+        touchPoint = layout[layout.index('static inline CGPoint dm_game_touch_point'):layout.index('\nUIView *dm_gamepad_view')]
         source = r'''
 #import <Foundation/Foundation.h>
 #import <CoreGraphics/CoreGraphics.h>
 #include <assert.h>
 #include <pthread.h>
 #include "DmPointerDrag.h"
+    LAYOUT_DEFINITION
+    TOUCH_POINT
 
 enum { UIApplicationStateActive = 0 };
 enum { UISceneActivationStateForegroundActive = 0 };
@@ -475,6 +480,7 @@ PUBLISH_METHODS
     CGPoint _pointerClickPosition, _stickNow[2], _rCentre;
     CFTimeInterval _pointerClickUntil, _pointerClickGapUntil;
     BOOL _keyboardEditing, _padOff, _tap, _full;
+    DmLayout _layout;
     NSMapTable<UITouch *, NSNumber *> *_owner, *_faceOf;
 }
 - (void)pushGame;
@@ -484,6 +490,7 @@ PUBLISH_METHODS
 - (CGPoint)faceCenter;
 - (CGFloat)faceGap;
 - (CGFloat)faceR;
+- (CGFloat)faceHitR;
 - (CGPoint)dpadCenter;
 - (CGFloat)dpadR;
 - (CGPoint)stickHome;
@@ -498,6 +505,7 @@ PUBLISH_METHODS
         _owner = [NSMapTable strongToStrongObjectsMapTable]; _faceOf = [NSMapTable strongToStrongObjectsMapTable];
         _pointerClicks = [NSMutableArray array]; _pointerClickSlot = -1; _padOff = YES;
         self.bounds = CGRectMake(0, 0, 1024, 768);
+        _layout = (DmLayout){CGRectMake(0, 96, 1024, 576), self.bounds, NO, NO};
         self.window = [UIWindow new]; self.window.isKeyWindow = YES;
         self.window.windowScene = [UIWindowScene new]; self.window.rootViewController = [UIViewController new];
     }
@@ -509,6 +517,7 @@ PUBLISH_METHODS
 - (CGPoint)faceCenter { return CGPointZero; }
 - (CGFloat)faceGap { return 1; }
 - (CGFloat)faceR { return 1; }
+- (CGFloat)faceHitR { return 1; }
 - (CGPoint)dpadCenter { return CGPointZero; }
 - (CGFloat)dpadR { return 1; }
 - (CGPoint)stickHome { return CGPointZero; }
@@ -634,10 +643,50 @@ int main(void) {
         [view touchesEnded:[NSSet setWithObject:pointer] withEvent:event];
         assert(!view->_pointerClicks.count && !view->_pointerTouch && !view->_pointerTimer);
         [view reset];
+
+        view.bounds = CGRectMake(0, 0, 768, 1024);
+        view->_layout = (DmLayout){CGRectMake(0, 40, 768, 432), CGRectMake(0, 512, 768, 512), YES, NO};
+        event.buttonMask = UIEventButtonMaskPrimary;
+        Click(view, event, 192, 148); Tick(view, 0.80);
+        assert(reportedCount == 1 && view->_pointerClickSlot == 0);
+        assert(fabs(reportedTouches[0].x - 0.25) < 0.001 && fabs(reportedTouches[0].y - 0.25) < 0.001);
+        finger = MakeTouch(UITouchTypeDirect, 576, 364);
+        [view touchesBegan:[NSSet setWithObject:finger] withEvent:event];
+        assert(reportedCount == 2 && view->_game[1] == finger);
+        assert(fabs(reportedTouches[0].x - 0.75) < 0.001 && fabs(reportedTouches[0].y - 0.75) < 0.001);
+        UITouch *controlsTouch = MakeTouch(UITouchTypeDirect, 100, 800);
+        [view touchesBegan:[NSSet setWithObject:controlsTouch] withEvent:event];
+        assert(reportedCount == 2 && ![view->_owner objectForKey:controlsTouch]);
+        Click(view, event, 100, 800); assert(!view->_pointerClicks.count);
+        [view reset];
+
+        view.bounds = CGRectMake(0, 0, 1024, 768);
+        view->_layout = (DmLayout){CGRectMake(-512.0 / 3, 0, 4096.0 / 3, 768), view.bounds, NO, NO};
+        Click(view, event, 0, 384); Tick(view, 1.00);
+        assert(reportedCount == 1);
+        assert(fabs(reportedTouches[0].x - 0.125) < 0.001 && fabs(reportedTouches[0].y - 0.5) < 0.001);
+        [view reset];
+
+        view->_layout = (DmLayout){view.bounds, view.bounds, NO, NO};
+        Click(view, event, 256, 192); Tick(view, 1.20);
+        assert(reportedCount == 1);
+        assert(fabs(reportedTouches[0].x - 0.25) < 0.001 && fabs(reportedTouches[0].y - 0.25) < 0.001);
+        [view reset];
+
+        view->_layout = (DmLayout){CGRectZero, view.bounds, NO, NO};
+        Click(view, event, 512, 384);
+        Tick(view, 1.40);
+        assert(!view->_pointerClicks.count && !view->_pointerTimer);
+        finger = MakeTouch(UITouchTypeDirect, 512, 384);
+        [view touchesBegan:[NSSet setWithObject:finger] withEvent:event];
+        assert(!view->_owner.count && reportedCount == 0);
+        [view pushGame]; assert(reportedCount == 0);
+        [view reset];
     }
     return 0;
 }
 '''
+        source = source.replace('LAYOUT_DEFINITION', layoutDefinition).replace('TOUCH_POINT', touchPoint)
         source = source.replace('PUBLISH_METHODS', publish).replace('POINTER_METHODS', pointer).replace('TOUCH_METHODS', touches)
         with tempfile.TemporaryDirectory(prefix='pointer routing ') as temporary:
             executable = pathlib.Path(temporary) / 'pointer-routing-check'
