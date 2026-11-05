@@ -398,7 +398,10 @@ enum { C_NONE = 0, C_STICK, C_DPAD, C_FACE, C_BTN, C_SWAP, C_GAME };
 static NSString *const UIWindowDidResignKeyNotification = @"window-resign";
 static NSString *const UISceneWillDeactivateNotification = @"scene-deactivate";
 static double testTime;
+static int testWebTouch;
 static double CACurrentMediaTime(void) { return testTime; }
+// Match the web overlay's touch ownership query used by the production gamepad.
+int front_web_touch(void) { return testWebTouch; }
 static double dist(CGPoint first, CGPoint second) { return hypot(first.x - second.x, first.y - second.y); }
 static const double K_STICK_GRAB = 1.4;
 static const double K_DPAD_GRAB = 1.3;
@@ -448,11 +451,17 @@ static void dm_touch_set(const dm_touch *touches, int count) {
 @implementation UIApplication
 + (instancetype)sharedApplication { static UIApplication *application; if (!application) application = [self new]; return application; }
 @end
+@class UIEvent;
 @interface UIView : NSObject
 @property CGRect bounds;
 @property UIWindow *window;
+- (UIView *)hitTest:(CGPoint)point withEvent:(UIEvent *)event;
 @end
 @implementation UIView
+- (UIView *)hitTest:(CGPoint)point withEvent:(UIEvent *)event {
+    (void)event;
+    return CGRectContainsPoint(self.bounds, point) ? self : nil;
+}
 @end
 @interface UITouch : NSObject
 @property int type;
@@ -542,6 +551,12 @@ int main(void) {
     @autoreleasepool {
         DmGamepad *view = [DmGamepad new];
         UIEvent *event = [UIEvent new]; event.buttonMask = UIEventButtonMaskSecondary;
+        assert([view hitTest:CGPointMake(512, 384) withEvent:event] == view);
+        testWebTouch = 1;
+        assert([view hitTest:CGPointMake(512, 384) withEvent:event] == nil);
+        view->_padOff = NO;
+        assert([view hitTest:CGPointMake(512, 384) withEvent:event] == view);
+        testWebTouch = 0; view->_padOff = YES;
         Click(view, event, 512, 384);
         assert(!view->_pointerTouch && !view->_pointerClicks.count && !view->_pointerTimer);
         event.buttonMask = UIEventButtonMaskPrimary;
