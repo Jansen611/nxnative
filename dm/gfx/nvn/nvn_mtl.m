@@ -5463,6 +5463,25 @@ static int pf_is_float(MTLPixelFormat f) {   // Float color formats that can sto
     switch (f) { case MTLPixelFormatR16Float: case MTLPixelFormatRG16Float: case MTLPixelFormatRGBA16Float: case MTLPixelFormatR32Float:
         case MTLPixelFormatRG32Float: case MTLPixelFormatRGBA32Float: case MTLPixelFormatRG11B10Float: return 1; default: return 0; }
 }
+// Remember the final depth-free BOTW canvas before it is copied to the swapchain.
+// Adapted from MacNativeGames (MIT); the full licence is in the BOTW profile's patches.py.
+static uint64_t g_aspect_canvas, g_aspect_last_canvas;
+static NSUInteger g_aspect_canvas_w, g_aspect_canvas_h, g_aspect_last_w, g_aspect_last_h;
+static void LearnAspectCanvas(MTL4RenderPassDescriptor *descriptor) {
+    if (!(dm_game_aspect() > 0) || R.rt.n < 1 || !R.rt.color[0]) return;
+    const tex_t *target = R.rt.color[0];
+    id<MTLTexture> texture = descriptor.colorAttachments[0].texture;
+    if (xv_present(target->serial)) {
+        if (g_aspect_last_canvas) {
+            g_aspect_canvas = g_aspect_last_canvas;
+            g_aspect_canvas_w = g_aspect_last_w; g_aspect_canvas_h = g_aspect_last_h;
+        }
+    } else if (texture && texture.pixelFormat == MTLPixelFormatRGB10A2Unorm && texture.width >= 640 && texture.height &&
+               fabs((double)texture.width / texture.height * 9 / 16 - 1) < 0.01 && !descriptor.colorAttachments[0].level && !descriptor.depthAttachment.texture) {
+        g_aspect_last_canvas = target->serial; g_aspect_last_w = texture.width; g_aspect_last_h = texture.height;
+        if (texture.width == g_aspect_canvas_w && texture.height == g_aspect_canvas_h) g_aspect_canvas = target->serial;
+    }
+}
 static int fz_load_covers(int i, id<MTLTexture> t, NSUInteger level);
 static NSMutableArray *g_lp;    // DM_NVN_LOADPROBE=1 / 2 / 3 (two constant sentinel values / NaN - under float formats normal shader output cannot reach NaN, ruling out numeric coincidence): attachments judged elidable are cleared to the sentinel color instead, and at pass end the remaining sentinel pixels are read back and counted (diagnostic: should be 0)
 static void lp_finish(void);
@@ -5959,6 +5978,7 @@ static id<MTL4RenderCommandEncoder> rp_begin_ex_(int clear_only) {
         }
         return nil;
     }
+    LearnAspectCanvas(pd);
     g_rp_aw = g_rp_ah = 0;
     if (rpa_on() && !g_rp_whole && !clear_only && R.has_sc && !g_rp_layered && !tbdr_on() && !R.clear_d && !R.clear_s) {
         int cl = 0; for (int i = 0; i < 8; i++) cl |= R.clear_c[i];
@@ -15234,7 +15254,8 @@ static void draw_(const p_draw *dw, const p_draw_idx *di) {
     if (g_enc && g_vis_counting && g_vis_n >= VIS_SLOTS) rp_end();   // this draw's query needs a slot and the buffer is bound for the whole pass: the next pass begins with a new one (rp_begin_ex)
     if (g_enc && g_rp_aw && (!R.has_sc || (long)R.sc.x + R.sc.w > (long)g_rp_aw || (long)R.sc.y + R.sc.h > (long)g_rp_ah)) rp_end();   // leaves the pass's render area
     fb_prepare(pr);   // same-pass feedback sampling: copy the snapshot first (see fb_prepare)
-    if (R.has_sc && !g_enc && !S.rast_discard) {
+    if (R.has_sc && !g_enc && !S.rast_discard &&
+        !(dm_game_aspect() > 0 && R.rt.n > 0 && R.rt.color[0] && R.rt.color[0]->serial == g_aspect_canvas)) {
         NSUInteger tw0 = 0, th0 = 0; rt_dims(&tw0, &th0);
         long x0 = R.sc.x < 0 ? 0 : R.sc.x, y0 = R.sc.y < 0 ? 0 : R.sc.y, x1 = (long)R.sc.x + R.sc.w, y1 = (long)R.sc.y + R.sc.h;
         if (x1 > (long)tw0) x1 = tw0; if (y1 > (long)th0) y1 = th0;
@@ -15315,7 +15336,21 @@ static void draw_(const p_draw *dw, const p_draw_idx *di) {
       if (!(g_ed.ok & ED_SREF) || g_ed.sref != sr || g_ed.sref_b != sb) { enc_r_stencil_ref(en, sr, sb); g_ed.sref = sr; g_ed.sref_b = sb; g_ed.ok |= ED_SREF; } }
     // Viewport / scissor (clamped within the target size)
     NSUInteger tw = g_pass.tw, th = g_pass.th;
+    double aspectScale = 1, effectiveAspect = dm_game_aspect();
+    if (effectiveAspect > 16.0 / 9.0 && R.rt.n > 0 && R.rt.color[0] && R.rt.color[0]->serial == g_aspect_canvas &&
+        (dw ? dw->count : di ? di->count : 0) == 6) {
+        int scenePicture = 0, textureId = (int)(S.tex[1][0] & 0xfffff);
+        os_unfair_lock_lock(&g_rmu);
+        if (textureId > 0 && textureId < g_ntreg && g_treg[textureId].ok) {
+            const tex_t *texture = &g_treg[textureId].t;
+            scenePicture = texture->d.width >= 320 && texture->d.height &&
+                fabs((double)texture->d.width / texture->d.height * 9 / 16 - 1) < 0.02 && mtl_tex_gpu_owned(texture->serial);
+        }
+        os_unfair_lock_unlock(&g_rmu);
+        if (!scenePicture) aspectScale = (16.0 / 9.0) / effectiveAspect;
+    }
     { MTLViewport v = S.has_vp ? (MTLViewport){S.vp[0][0], S.vp[0][1], S.vp[0][2], S.vp[0][3], S.dr[0], S.dr[1]} : (MTLViewport){0, 0, tw, th, 0, 1};
+      if (aspectScale != 1) { v.originX = tw / 2.0 + (v.originX - tw / 2.0) * aspectScale; v.width *= aspectScale; }
       if (atomic_load_explicit(&g_origin_ll, memory_order_relaxed)) { v.originY += v.height; v.height = -v.height; }   // lower-left origin (see g_origin_ll)
       // Viewport swizzle: NEGATIVE_Y negates clip y, the same as the viewport flipped about its centre; facing is decided after it on the GPU as in Metal, so the winding stays.
       // Other swizzles (axis exchanges, negated x / z / w) are no viewport change and are drawn unswizzled
@@ -15325,7 +15360,9 @@ static void draw_(const p_draw *dw, const p_draw_idx *di) {
       if (!(g_ed.ok & ED_VP) || memcmp(&g_ed.vp, &v, sizeof v)) { enc_r_viewport(en, v); g_ed.vp = v; g_ed.ok |= ED_VP; } }
     MTLScissorRect sc = {0, 0, tw, th};
     if (R.has_sc && !S.rast_discard) {   // raster state cannot suppress vertex storage writes
-        long x0 = R.sc.x < 0 ? 0 : R.sc.x, y0 = R.sc.y <= 0 ? 0 : R.sc.y, x1 = (long)R.sc.x + R.sc.w, y1 = (long)R.sc.y + R.sc.h;
+        long sx0 = R.sc.x, sx1 = (long)R.sc.x + R.sc.w;
+        if (aspectScale != 1) { sx0 = lround(tw / 2.0 + (sx0 - tw / 2.0) * aspectScale); sx1 = lround(tw / 2.0 + (sx1 - tw / 2.0) * aspectScale); }
+        long x0 = MAX(sx0, 0), y0 = R.sc.y <= 0 ? 0 : R.sc.y, x1 = sx1, y1 = (long)R.sc.y + R.sc.h;
         if (x1 > (long)tw) x1 = tw; if (y1 > (long)th) y1 = th;
         if (x1 <= x0 || y1 <= y0) { PD("Z %llu draw skipped: empty scissor (%d,%d %dx%d, target %lux%lu)", g_stat_pass, R.sc.x, R.sc.y, R.sc.w, R.sc.h, (unsigned long)tw, (unsigned long)th); return; }
         sc = (MTLScissorRect){(NSUInteger)x0, (NSUInteger)y0, (NSUInteger)(x1 - x0), (NSUInteger)(y1 - y0)};
@@ -17333,6 +17370,8 @@ static _Atomic uint64_t g_layer_shape, g_screen_shape;   // w | h << 32, 0 = non
 void mtl_present_layer(uint32_t w, uint32_t h) { atomic_store(&g_layer_shape, (uint64_t)w | (uint64_t)h << 32); }
 void mtl_present_screen(uint32_t w, uint32_t h) { atomic_store(&g_screen_shape, (uint64_t)w | (uint64_t)h << 32); }
 static void present_shape(id<MTLTexture> src, double *w, double *h) {
+    float cameraAspect = dm_game_aspect();
+    if (cameraAspect > 0) { *w = cameraAspect * 1080; *h = 1080; return; }
     uint64_t v = atomic_load(&g_screen_shape);
     if (v && fabs(((double)src.width / src.height) / ((double)(uint32_t)v / (double)(v >> 32)) - 1) < 0.01) { *w = src.width; *h = src.height; return; }
     v = atomic_load(&g_layer_shape);
@@ -18006,6 +18045,7 @@ static int link_on(void) { return g_dm_present_link && !atomic_load(&g_rescue_mo
 __attribute__((weak)) int front_screen_max_fps(void) { return 0; }   // front_mac.m; graphics unit tests and iOS have none
 __attribute__((weak)) void front_screen_match(int fps) { (void)fps; }   // front_mac.m; graphics unit tests and iOS have none
 __attribute__((weak)) void front_picture_shape(int w, int h) { (void)w; (void)h; }   // front_mac.m, front_ios.m; graphics unit tests have none
+__attribute__((weak)) float dm_game_aspect(void) { return 0; }   // graphics tests do not link the loader
 static CAFrameRateRange link_range(int mode) {
     static int on = -1; if (on < 0) { const char *e = getenv("DM_LINK_VTICK"); on = !(e && !strcmp(e, "0")); }
     int rate = mode == 3 ? 30 : mode == 2 ? 120 : 60, hz = on ? front_screen_max_fps() : 0;

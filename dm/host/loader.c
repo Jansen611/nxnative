@@ -8,6 +8,8 @@
 #include <sys/stat.h>
 #include <unistd.h>
 #include <limits.h>
+#include <math.h>
+#include <stdatomic.h>
 #include <mach-o/getsect.h>
 #include <mach-o/ldsyms.h>
 #include "hle.h"
@@ -265,6 +267,7 @@ static void read_layout(module_t *m, const char *dir) {
         else if (!strcmp(key, "RO_OFF")) m->ro_off = v;
         else if (!strcmp(key, "DATA_OFF")) m->data_off = v;
         else if (!strcmp(key, "FPS_STATE_OFF")) m->fps_state_off = v;
+        else if (!strcmp(key, "CAMERA_ASPECT")) m->camera_aspect = v == 1;
         else if (!strcmp(key, "RENDER_SCALE")) m->render_scale_max = (uint32_t)v;
         else if (!strcmp(key, "STEP_MAX")) m->step_max = (uint32_t)v;
         else if (!strcmp(key, "UE_MALLOC_VT")) m->ue_malloc_vt = v;
@@ -309,15 +312,59 @@ uint8_t *dm_fps_state;
 int dm_fps_step_max;   // the largest step the stubs give the game (STEP_MAX in its fixups table; 0 = FSTEP_MAX): the frame step holds frames and pays back within it (hle_nvn.c)
 static const char *g_fps_mod;   // the module holding the state page (for the log)
 static float g_render_scale_max = 1.0f;   // the render-scale stub's largest scale (RENDER_SCALE in its fixups table; 1 for a stub that only lowers the game's size)
+static pthread_mutex_t g_aspect_mu = PTHREAD_MUTEX_INITIALIZER;
+static _Atomic(uint8_t *) g_aspect_state;
+static float g_aspect_drawable;
+static int g_aspect_enabled;
+
+// Publish the desired aspect to the build-verified camera stub.
+static void PublishCameraAspect(void) {
+    uint8_t *state = atomic_load_explicit(&g_aspect_state, memory_order_relaxed);
+    if (!state) return;
+    float ratio = g_aspect_enabled ? g_aspect_drawable : 0;
+    uint32_t bits; memcpy(&bits, &ratio, sizeof bits);
+    atomic_store_explicit((_Atomic uint32_t *)(void *)(state + 0x200), bits, memory_order_release);
+}
+
+// Keep the drawable's wider-than-16:9 shape for the camera when the feature is enabled.
+void dm_game_aspect_drawable(double width, double height) {
+    if (!(width > 0 && height > 0) || !isfinite(width) || !isfinite(height)) return;
+    double ratio = width / height;
+    float wide = ratio > 16.0 / 9.0 && ratio <= 8.0 ? (float)ratio : 0;
+    pthread_mutex_lock(&g_aspect_mu);
+    if (g_aspect_drawable != wide) { g_aspect_drawable = wide; PublishCameraAspect(); }
+    pthread_mutex_unlock(&g_aspect_mu);
+}
+
+// Return the aspect actually applied by the guest, rather than the requested value.
+float dm_game_aspect(void) {
+    uint8_t *state = atomic_load_explicit(&g_aspect_state, memory_order_acquire);
+    if (!state) return 0;
+    uint32_t bits = atomic_load_explicit((_Atomic uint32_t *)(void *)(state + 0x204), memory_order_acquire);
+    float ratio; memcpy(&ratio, &bits, sizeof ratio);
+    return ratio;
+}
 static void install_fps_state(module_t *m) {
-    if (m->fps_state_off + 0x40 > m->size || m->fps_state_off < m->key_page_off + m->key_page_size) die("%s: frame step state page out of range", m->name);
+    if (m->fps_state_off > m->size || m->size - m->fps_state_off < 0x208 || m->fps_state_off < m->key_page_off + m->key_page_size) die("%s: frame step state page out of range", m->name);
     dm_fps_state = m->base + m->fps_state_off; g_fps_mod = m->name; dm_fps_step_max = (int)m->step_max;
+    if (m->camera_aspect && !strcmp(m->name, "main") && !strcmp(m->build_id, "cd57b23fa4bbad65803d9788c01821ee")) {
+        pthread_mutex_lock(&g_aspect_mu);
+        atomic_store_explicit(&g_aspect_state, dm_fps_state, memory_order_release);
+        PublishCameraAspect();
+        pthread_mutex_unlock(&g_aspect_mu);
+    }
     if (m->render_scale_max > 1) g_render_scale_max = (float)m->render_scale_max;
 }
 // The settings in the state page, written when the game starts (main.c, after host loading): on iOS the loading runs at app launch, before the launcher has set DM_FPS_TARGET and
 // DM_RENDER_SCALE (Launcher.swift), and nothing reads the page before the game runs
 void dm_fps_state_apply(void) {
     if (!dm_fps_state) return;
+    pthread_mutex_lock(&g_aspect_mu);
+    const char *wide = getenv("DM_WIDESCREEN");
+    const char *screenShape = getenv("DM_SCREEN_ASPECT");
+    g_aspect_enabled = wide && !strcmp(wide, "1") && (!screenShape || !*screenShape || !strcmp(screenShape, "0"));
+    PublishCameraAspect();
+    pthread_mutex_unlock(&g_aspect_mu);
     const char *e = getenv("DM_FPS_TARGET"); int t = e ? atoi(e) : DM_GAME_FPS_TARGET;
     if (t != 0 && t != 30 && t != 60) { LOG("[RED] DM_FPS_TARGET=%s: must be 0, 30 or 60; using the game's own frame step", e); t = 0; }
     float f = (float)t; memcpy(dm_fps_state, &f, sizeof f);

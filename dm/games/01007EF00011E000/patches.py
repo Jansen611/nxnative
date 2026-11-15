@@ -470,13 +470,64 @@ def frame_step(ctx):
         emit(w)
     emit(B(here(), 0xed81f4))
     fs_put(0xf75ba4, [B(0xf75ba4, start) | 0x80000000], 'screen copy into a 16:9 picture (camera photo): the screen\'s middle 16:9 band, not the whole taller screen squashed into it')
+    CameraAspect(ctx)
+
+
+# Replace the main camera's aspect after its original calculation and acknowledge the applied value.
+def CameraAspect(ctx):
+    # Adapted from MacNativeGames games/totk/runtime/game_patches_botw.c:
+    # https://github.com/ly05010419/MacNativeGames (MIT).
+    # Copyright (c) 2026 MacNativeGames contributors
+    #
+    # Permission is hereby granted, free of charge, to any person obtaining a copy
+    # of this software and associated documentation files (the "Software"), to deal
+    # in the Software without restriction, including without limitation the rights
+    # to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+    # copies of the Software, and to permit persons to whom the Software is
+    # furnished to do so, subject to the following conditions:
+    #
+    # The above copyright notice and this permission notice shall be included in all
+    # copies or substantial portions of the Software.
+    #
+    # THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+    # IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+    # FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+    # AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+    # LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+    # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+    # SOFTWARE.
+    # State +0x200/+0x204 is separate from dynamic resolution and the taller-screen
+    # FOV history at +0x100..+0x1ff. Zero preserves the game's original aspect.
+    original = (0xbd406e80, 0x39006276, 0xbd00aa60, 0xbd407280, 0x39006276,
+                0xbd00ae60, 0x2d4806a0, 0x2d470ea2, 0x39006276, 0x1e233821,
+                0x1e223800, 0x1e211800, 0xbd00c260)
+    site = 0x10edae0
+    ctx.site(site, struct.pack('<13I', *original).hex())
+    start = ctx.here()
+    for word in original[:-1]:
+        ctx.emit(word)
+    ctx.emit(ADRP(8, ctx.here(), ctx.state))
+    for word in (0x91080108,   # add x8,x8,#0x200: desired aspect
+                 0x88dffd09,   # ldar w9,[x8]
+                 0x34000049,   # cbz w9,store
+                 0x1e270120,   # fmov s0,w9
+                 original[-1], # str s0,[x19,#0xc0]
+                 0x91001108,   # add x8,x8,#4: acknowledgement
+                 0x889ffd09):  # stlr w9,[x8]
+        ctx.emit(word)
+    ctx.emit(B(ctx.here(), site + 4 * len(original)))
+    ctx.put(site, [B(site, start)] + [0xd503201f] * (len(original) - 1),
+            'main camera aspect: apply and acknowledge the host ratio (state +0x200/+0x204)')
 
 
 FRAME_STEP = {'cd57b23fa4bbad65803d9788c01821ee': frame_step}
+CAPABILITIES = {'cd57b23fa4bbad65803d9788c01821ee': ('CAMERA_ASPECT',)}
 
 # How general each patch is and could be (dm/tools/docs_patches.py "Binding", listed in docs/agents/game-patches.md): what, its binding now, the loosest it could have (goal),
 # purpose, why; blocked or kept: why the gap stays open (cannot close yet, or left open on purpose); checked: what was checked on game files (else a judgement)
 BINDING = [
+    {'what': 'BOTW camera-aspect acknowledgement', 'now': 'build', 'goal': 'game', 'purpose': 'rendering',
+     'why': "the camera writer is verified for this game's 1.9.0 main", 'blocked': 'the camera stub has no function-matched form yet'},
     {'what': 'interval controller: the lower bound and the GPU-time path', 'now': 'build', 'goal': 'game', 'purpose': 'frame rate',
      'why': "sead::GameFrameworkNx's interval controller in this build; Tears of the Kingdom shares sead but not this code"},
     {'what': '60 fps frame step and render scale (ksys::VFR)', 'now': 'build', 'goal': 'game', 'purpose': 'frame rate',

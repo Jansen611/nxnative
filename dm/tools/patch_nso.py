@@ -1714,7 +1714,7 @@ if (BUILD_ID in FRAME_STEP or FS_MATCH) and NAME == 'main':
         # The loader supplies zero-filled BSS/key pages for a front patch area.
         # Reserve the frame state after the key page there too; stubs reach it by ADRP.
         IMAGE_SIZE = FS_STATE_OFF + 0x4000
-    assert FS_STATE_OFF % 0x1000 == 0 and (FAR or FS_STATE_OFF + 0x40 <= PATCH_OFF) and not any(IMG[FS_STATE_OFF:]), 'frame step state page'
+    assert FS_STATE_OFF % 0x1000 == 0 and (FAR or FS_STATE_OFF + 0x208 <= PATCH_OFF) and not any(IMG[FS_STATE_OFF:]), 'frame step state page'
 # What frame step and stub code (STUBS below) may write: a site whose original bytes match and that holds no rewrite site, the cuts list (<name>.cuts.tsv) that names it, and
 # data addresses read from the original text
 def stub_site(off, orig, what):

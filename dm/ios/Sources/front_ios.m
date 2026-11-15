@@ -197,6 +197,8 @@ static void launcher_done(void) { [g_root startGame]; }
     UIEdgeInsets gameInsets = dm_game_safe_insets(b, self.view.safeAreaInsets, duoPortrait);
     BOOL onTV = self.game.superview != self.view;   // the TV's view lays the picture out; the phone is all pad
     DmLayout layout = onTV ? dm_layout_pad_only(b) : dm_layout_picture(dm_layout(b, gameInsets, self.partiallyOpen, division, g_picture_aspect), b, self.fill, g_picture_aspect);
+    if (!onTV && !layout.separated) dm_game_aspect_drawable(b.size.width, b.size.height);
+    else dm_game_aspect_drawable(1, 1);   // the split or TV layout does not use the full phone window
     if (!onTV) self.game.frame = layout.game;
     layout.topSafeOnly = duoPortrait;
     NSString *line = [NSString stringWithFormat:@"%@, hinge %ld%s, divisions %@, picture %@, controls %@", onTV ? @"pad only (picture on the TV)" : layout.separated ? @"split" : self.fill ? @"overlay, Fill" : @"overlay",
