@@ -471,6 +471,30 @@ def frame_step(ctx):
     emit(B(here(), 0xed81f4))
     fs_put(0xf75ba4, [B(0xf75ba4, start) | 0x80000000], 'screen copy into a 16:9 picture (camera photo): the screen\'s middle 16:9 band, not the whole taller screen squashed into it')
     CameraAspect(ctx)
+    CaptureRectAspect(ctx)
+
+
+# Match captured screen rectangles to the horizontally compensated layout.
+def CaptureRectAspect(ctx):
+    # These two calls copy the scene behind a layout pane. Their x3 scale at
+    # [sp + offset] is the captured width / screen width. The widened layout
+    # is drawn at 16:9 / aspect, so its capture must sample that same fraction
+    # about the screen centre; otherwise the backing shows a shifted image.
+    for site, original, scale_offset in ((0xf5a5b0, '11f7fd97', 0xa0), (0xf66428, '73c7fd97', 0x50)):
+        ctx.site(site, original)
+        start = ctx.here()
+        ctx.emit(0xd10083ff); ctx.emit(0xad0007e0)   # sub sp,sp,#32; stp q0,q1,[sp]
+        ctx.emit(ADRP(16, ctx.here(), ctx.state))
+        for word in (0xbd420600, 0x1e202008, 0x540001a0,   # ldr s0,[x16,#0x204]; fcmp s0,#0; b.eq restore
+                     0xbd4003e0 | (scale_offset // 4 << 10), 0x1e2e1002, 0x1e222000, 0x5400012a,  # full-width capture: restore
+                     0xbd420600, 0x1e201001, 0x1e2e5002, 0x1e221821, 0x1e201821,  # s1 = (2 / 1.125) / aspect
+                     0xbd4003e0 | (scale_offset // 4 << 10), 0x1e210800,
+                     0xbd0003e0 | (scale_offset // 4 << 10),  # scale x *= s1
+                     0xad4007e0, 0x910083ff):   # ldp q0,q1,[sp]; add sp,sp,#32
+            ctx.emit(word)
+        ctx.emit(B(ctx.here(), 0xed81f4) | 0x80000000)
+        ctx.emit(B(ctx.here(), site + 4))
+        ctx.put(site, [B(site, start)], 'screen capture source width follows the widescreen UI compensation')
 
 
 # Replace the main camera's aspect after its original calculation and acknowledge the applied value.
@@ -528,6 +552,8 @@ CAPABILITIES = {'cd57b23fa4bbad65803d9788c01821ee': ('CAMERA_ASPECT',)}
 BINDING = [
     {'what': 'BOTW camera-aspect acknowledgement', 'now': 'build', 'goal': 'game', 'purpose': 'rendering',
      'why': "the camera writer is verified for this game's 1.9.0 main", 'blocked': 'the camera stub has no function-matched form yet'},
+    {'what': 'screen capture rectangle follows widescreen UI compensation', 'now': 'build', 'goal': 'game', 'purpose': 'rendering',
+     'why': "the capture calls and their stack arguments belong to this game's layout code", 'blocked': 'the capture stubs have no function-matched form yet'},
     {'what': 'interval controller: the lower bound and the GPU-time path', 'now': 'build', 'goal': 'game', 'purpose': 'frame rate',
      'why': "sead::GameFrameworkNx's interval controller in this build; Tears of the Kingdom shares sead but not this code"},
     {'what': '60 fps frame step and render scale (ksys::VFR)', 'now': 'build', 'goal': 'game', 'purpose': 'frame rate',

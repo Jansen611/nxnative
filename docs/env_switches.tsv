@@ -441,7 +441,7 @@ DM_WATCH	diagnostic	`=<s>` dumps all threads after that many seconds (SIGALRM) a
 DM_WATCH_SAMPLE	diagnostic	`=<path>` (Mac): when the stall watchdog fires, samples the process for 1 s with `/usr/bin/sample` and writes the thread stacks to that path
 DM_WATCH_STALL	diagnostic	`=<s>`: when the frame loop makes no progress for that long (default 15 with `DM_WATCH`), logs a red line, dumps the threads and exits
 DM_WEB_LOG	diagnostic	`1` logs each key an offline HTML page is given and where the focus is after it
-DM_WIDESCREEN	diagnostic	`1` enables the experimental build-gated BOTW 1.9.0 wider-than-16:9 camera and presentation; off by default, and disabled with a taller DM_SCREEN_ASPECT. The inventory character preview has a visible double image.
+DM_WIDESCREEN	diagnostic	`1` enables the experimental build-gated BOTW 1.9.0 wider-than-16:9 camera and presentation; off by default, and disabled with a taller DM_SCREEN_ASPECT. At 21:9 a duplicate shield fragment can appear in the inventory.
 DM_WINDOW	switch	When set (to any value, `0` included) opens a Mac window with keyboard and controller input; unset runs headless with the guest on the current thread; the Mac launcher sets it
 DM_WINDOW_SIZE	diagnostic	`=<width>x<height>` sets the Mac window's initial content size in points, e.g. `1300x600` for 19.5:9; requires `DM_WINDOW`
 DM_WINDOW_TOP	diagnostic	`1` (Mac, with `DM_WINDOW`) orders the game window in front without activating it and keeps it above other apps' windows, so a covered window does not slow the run; `regress.py` sets it
