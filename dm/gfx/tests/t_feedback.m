@@ -48,10 +48,12 @@ static void pixels(id<MTLBuffer> b, unsigned offset, const uint8_t want[4], cons
         valid &= !memcmp((const uint8_t *)b.contents + offset + y * 256 + x * 4, want, 4);
     CHECK(valid, label);
 }
+static uint32_t *g_ubo_words;   // a pool page: the uniform buffer that holds the handle of the TEXU case
+// slot: a texture or image slot, or for a TEXU binding the uniform-buffer slot whose word 0 holds the handle (encode_args and fb_prepare read it through ubo_bind_handle)
 static void slot_case(NvProg *pr, id<MTLRenderPipelineState> pipeline, int slot, int index) {
     int before = failed, tid = 600 + index;
     NvShader *fs = pr->sh[1]; fs->rf.b[0].reg = slot;
-    int image = fs->rf.b[0].kind == NVN_RB_IMG;
+    int image = fs->rf.b[0].kind == NVN_RB_IMG, texu = fs->rf.b[0].kind == NVN_RB_TEXU;
     tex_t source, output;
     id<MTLTexture> original = target_format(&source, 99700 + index * 2, image ? NVN_FORMAT_R32UI : NVN_FORMAT_RGBA8, 1);
     id<MTLTexture> destination = target(&output, 99701 + index * 2);
@@ -59,7 +61,9 @@ static void slot_case(NvProg *pr, id<MTLRenderPipelineState> pipeline, int slot,
     id<MTLBuffer> result = [g_dev newBufferWithLength:2048 options:MTLResourceStorageModeShared]; res_add(result);
     state_reset(); memset(&R, 0, sizeof R); mtl_sub_begin();
     R.has_rt = 1; R.rt.n = 1; R.rt.color[0] = &source;
-    if (image) S.img[1][slot] = tid; else S.tex[1][slot] = tid;
+    if (image) S.img[1][slot] = tid;
+    else if (texu) { g_ubo_words[0] = (uint32_t)tid; S.ubo[1][slot] = (p_bind_buf){.addr=(uint64_t)(uintptr_t)g_ubo_words, .size=16}; }
+    else S.tex[1][slot] = tid;
     clear(MTLClearColorMake(image ? 17 : 1, 0, 0, 1));
     if (image) {
         fs->rf.b[0].rw = 1; fb_prepare(pr);
@@ -103,7 +107,7 @@ static void slot_case(NvProg *pr, id<MTLRenderPipelineState> pipeline, int slot,
     CHECK(!mtl_last_commit_error(), "GPU submission has no error");
     pixels(result, 0, (const uint8_t[]){255, 0, 0, 255}, "first draw reads the red pre-overwrite snapshot");
     pixels(result, 1024, (const uint8_t[]){0, 255, 0, 255}, "following draw reads the green original attachment");
-    printf("feedback slot %d: %s\n", slot, before == failed ? "PASS" : "FAIL");
+    printf("feedback %s %d: %s\n", texu ? "handle in uniform slot" : "slot", slot, before == failed ? "PASS" : "FAIL");
     mtl_tex_release(&source); mtl_tex_release(&output);
 }
 // A registered image view names its own level. A shader that needs a different pixel class keeps its normal image binding.
@@ -297,6 +301,37 @@ static void tile_case(const char *dir) {
     CHECK(g_fb_tseq == g_draw_seq && g_fb_n == 1 && g_fb_src[0] == attachment && g_fb_count == copies + 2,
           "sampled slot 0 reads the tile while image slot 0 snapshots the same attachment");
     rp_end(); fs->rf.nb = 1; S.img[1][0] = 0;
+    // A draw that opens its pass: the first learns the formats of the pass that opens for it and takes a snapshot, the next plans its tile read with no pass open and the pass loads what it reads
+    id<MTLBuffer> result2 = [g_dev newBufferWithLength:1024 options:MTLResourceStorageModeShared]; res_add(result2);
+    g_fb_bar++; clear(MTLClearColorMake(1, 0, 0, 1));
+    enc_r_pso(g_enc, green); enc_r_viewport(g_enc, (MTLViewport){0, 0, 4, 4, 0, 1}); enc_r_scissor(g_enc, (MTLScissorRect){0, 0, 2, 4}); enc_r_draw(g_enc, MTLPrimitiveTypeTriangle, 0, 3);
+    rp_end();
+    uint64_t ecopies = g_fb_count, eok = g_fb_early_n;
+    S.chmask.mask = 0; fb_prepare(pr); S.chmask.mask = 0xffffffffu;
+    CHECK(!g_fb_n && g_fb_count == ecopies && g_fb_learn_seq != g_draw_seq && g_fb_early_seq != g_draw_seq, "a draw that opens its pass and writes no attachment it samples learns nothing");
+    fb_prepare(pr);
+    CHECK(!g_enc && g_fb_n == 1 && g_fb_count == ecopies + 1 && g_fb_learn_seq == g_draw_seq && g_fb_tseq != g_draw_seq, "the first draw that opens its pass takes a snapshot");
+    CHECK(rp_begin_ex(0) != nil && fb_early_after() && g_fb_el[g_fb_early_key & 63].ok && g_fb_el[g_fb_early_key & 63].pi.cfmt[0] == MTLPixelFormatRGBA8Unorm && g_fb_el[g_fb_early_key & 63].pi.tw == 4, "and the pass that opened is noted");
+    rp_end(); g_fb_bar++;
+    fb_prepare(pr);
+    CHECK(!g_enc && g_fb_n == 0 && g_fb_count == ecopies + 1 && g_fb_early_seq == g_draw_seq && g_fb_tseq == g_draw_seq && g_fb_tfn, "the next one plans its tile read with no pass open: no snapshot");
+    CHECK(rp_begin_ex(0) != nil && fb_early_after() && g_fb_early_n == eok + 1, "the pass that opens is the one it planned for");
+    g_pso_lmap = g_fb_tlmap; g_pso_fsfn = g_fb_tfn; g_pso_fz = g_fb_tdesc;
+    id<MTLRenderPipelineState> eps = pso_get(pr, nil);
+    g_pso_lmap = NULL; g_pso_fsfn = nil; memset(&g_pso_fz, 0, sizeof g_pso_fz);
+    CHECK(eps == g_fb_tp[0].ps, "its pipeline is the one built for the open-pass case");
+    udc_note_draw(pr, 1);   // the draw path's note that this draw writes attachment 0: a pass that loaded it and wrote nothing stores nothing
+    if (eps && g_enc) { enc_r_pso(g_enc, eps); enc_r_viewport(g_enc, (MTLViewport){0, 0, 4, 4, 0, 1}); enc_r_scissor(g_enc, (MTLScissorRect){0, 0, 4, 4}); enc_r_args(g_enc, MTLRenderStageFragment, zero.gpuAddress, 0); enc_r_draw(g_enc, MTLPrimitiveTypeTriangle, 0, 3); }
+    rp_end();
+    enc_b_copy_texture_buffer(blit(), attachment, 0, 0, MTLOriginMake(0, 0, 0), MTLSizeMake(4, 4, 1), result2, 0, 256, 1024);
+    g_fb_bar++; fb_prepare(pr);
+    CHECK(g_fb_early_seq == g_draw_seq, "planned again");
+    g_fb_el[g_fb_early_key & 63].pi.dfmt = 1;   // as if the pass it planned for had a depth attachment
+    CHECK(rp_begin_ex(0) != nil && !fb_early_after() && g_fb_el[g_fb_early_key & 63].fails == 1 && !g_fb_el[g_fb_early_key & 63].pi.dfmt, "a pass other than the planned one is refused, counted and noted");
+    rp_end(); ecopies = g_fb_count; g_fb_noearly = 1; fb_prepare(pr); g_fb_noearly = 0;
+    CHECK(!g_enc && g_fb_n == 1 && g_fb_count == ecopies + 1 && g_fb_tseq != g_draw_seq, "and the draw goes back to a snapshot");
+    g_fb_el[g_fb_early_key & 63].fails = 3; g_fb_bar++; ecopies = g_fb_count; fb_prepare(pr);
+    CHECK(g_fb_n == 1 && g_fb_count == ecopies + 1 && g_fb_early_seq != g_draw_seq, "after three such passes it plans no more");
     S.vp[0][2] = 2; g_fb_bar++;
     clear(MTLClearColorMake(1, 0, 0, 1));
     fb_prepare(pr);
@@ -309,6 +344,10 @@ static void tile_case(const char *dir) {
         if (x < 2) left &= p[0] == 255 && p[1] == 0 && p[2] == 0; else right &= p[0] == 0 && p[1] == 0 && p[2] == 255; }
     CHECK(left, "where the earlier draw of the pass wrote green, the tile read gives green");
     CHECK(right, "elsewhere it gives the cleared red");
+    left = right = 1;
+    for (int y = 0; y < 4; y++) for (int x = 0; x < 4; x++) { const uint8_t *p = (const uint8_t *)result2.contents + y * 256 + x * 4;
+        if (x < 2) left &= p[0] == 255 && p[1] == 0 && p[2] == 0; else right &= p[0] == 0 && p[1] == 0 && p[2] == 255; }
+    CHECK(left && right, "the draw that opened its pass read what the pass loaded: green on the left, red on the right");
     printf("feedback tile read: %s\n", before == failed ? "PASS" : "FAIL");
     mtl_tex_release(&source);
 }
@@ -409,6 +448,7 @@ static void shape_case(void) {
     for (int frame = 0; frame < 6; frame++) {
         g_fb_bar++;   // the game's barrier before each snapshot draw, as in Tears of the Kingdom's shrines
         for (int k = 0; k < 5; k++, g_fb_bar++) {
+            g_draw_seq++;   // each snapshot a draw of its own: an entry handed to the current draw is not taken for another key
             fb_cache_t *e = fb_snap(1000 + frame * 5 + k, 0, 0, MTLPixelFormatRGBA8Unorm, size[k][0], size[k][1], 0, &fresh);
             bad += !e || !fresh || e->snap.width != size[k][0] || e->snap.height != size[k][1];
             if (e) [made addObject:[NSValue valueWithPointer:(__bridge void *)e->snap]];
@@ -416,10 +456,47 @@ static void shape_case(void) {
     }
     CHECK(!bad, "every new key gets a texture of its size");
     CHECK(made.count == 4, "30 snapshots of 4 sizes over 6 frames make one texture per size, not one each");
-    fb_cache_t *a = fb_snap(1, 0, 0, MTLPixelFormatRGBA8Unorm, 64, 32, 0, &fresh), *b = fb_snap(2, 0, 0, MTLPixelFormatRGBA8Unorm, 64, 32, 0, &fresh);
+    g_draw_seq++; fb_cache_t *a = fb_snap(1, 0, 0, MTLPixelFormatRGBA8Unorm, 64, 32, 0, &fresh);
+    g_draw_seq++; fb_cache_t *b = fb_snap(2, 0, 0, MTLPixelFormatRGBA8Unorm, 64, 32, 0, &fresh);
     CHECK(a != b, "a live snapshot is not taken for another key while a stale entry is free");
     fb_cache_t *a2 = fb_snap(1, 0, 0, MTLPixelFormatRGBA8Unorm, 64, 32, 0, &fresh);
     CHECK(a2 == a && !fresh, "the live snapshot is reused until the next barrier");
+    for (int i = 0; i < 8; i++) { g_fbc[i] = (fb_cache_t){0}; } g_fbc_use = 0;
+}
+// One draw samples two attachments of one format and size while every snapshot entry is live (eight keys since the last barrier, in this submission) and only one entry has that shape:
+// the first attachment's, cached from an earlier draw or copied for this one. Each binding must get a snapshot of its own; the second key took the first one's entry and copied its
+// attachment over it, so both bindings sampled the second attachment (PR #813)
+static void same_draw_case(int cached_first) {
+    int before = failed, tid = 760 + cached_first * 2, fresh;
+    for (int i = 0; i < 8; i++) { g_fbc[i] = (fb_cache_t){0}; } g_fbc_use = 0;
+    NvProg *pr = [NvProg new]; NvShader *fs = [NvShader new]; pr->sh[1] = fs; fs->stage = 1; strcpy(fs->key, "fedcba9876543210");
+    fs->rf.nb = 2; fs->rf.b[0] = (nvn_rbind){.kind=NVN_RB_TEX, .reg=0, .aid=0, .dtt=MTLTextureType2D}; fs->rf.b[1] = (nvn_rbind){.kind=NVN_RB_TEX, .reg=1, .aid=1, .dtt=MTLTextureType2D};
+    tex_t a, b; id<MTLTexture> ta = target(&a, 99850 + cached_first * 2), tb = target(&b, 99851 + cached_first * 2);
+    mtl_reg_tex(tid, &a, NULL); mtl_reg_tex(tid + 1, &b, NULL);
+    id<MTLBuffer> result = [g_dev newBufferWithLength:2048 options:MTLResourceStorageModeShared]; res_add(result);
+    state_reset(); memset(&R, 0, sizeof R); mtl_sub_begin();
+    R.has_rt = 1; R.rt.n = 1;
+    R.rt.color[0] = &a; clear(MTLClearColorMake(1, 0, 0, 1)); rp_end();
+    R.rt.color[0] = &b; clear(MTLClearColorMake(0, 1, 0, 1)); rp_end();
+    for (int i = 0; i < 8; i++) {   // earlier draws of this submission: the first attachment's snapshot (or another key's of its shape), then seven other shapes
+        g_draw_seq++;
+        fb_cache_t *e = fb_snap(i == 0 && cached_first ? a.serial : 5000 + (uint64_t)i, 0, 0, ta.pixelFormat, 4 + (NSUInteger)i, 4, 0, &fresh);
+        CHECK(e && fresh, "an earlier draw takes a snapshot entry");
+        if (e && i == 0 && cached_first) enc_b_copy_texture(blit(), ta, 0, 0, MTLOriginMake(0, 0, 0), MTLSizeMake(4, 4, 1), e->snap, 0, 0, MTLOriginMake(0, 0, 0));
+    }
+    R.rt.n = 2; R.rt.color[0] = &a; R.rt.color[1] = &b; S.tex[1][0] = tid; S.tex[1][1] = tid + 1; S.chmask.mask = 0xffffffffu;
+    uint64_t copies = g_fb_count;
+    fb_prepare(pr);
+    CHECK(g_fb_n == 2 && g_fb_src[0] == ta && g_fb_src[1] == tb, "the draw samples snapshots of both attachments");
+    CHECK(g_fb_count == copies + 2 - (uint64_t)cached_first, cached_first ? "the cached snapshot is reused and the other copied" : "both are copied");
+    CHECK(g_fb_n == 2 && g_fb_use[0] != g_fb_use[1], "each attachment gets a snapshot of its own");
+    if (g_fb_n == 2) { readback(g_fb_use[0], result, 0); readback(g_fb_use[1], result, 1024); }
+    CHECK(mtl_wait(mtl_sub_commit(), 5000000000ull), "GPU submission completed");
+    CHECK(!mtl_last_commit_error(), "GPU submission has no error");
+    pixels(result, 0, (const uint8_t[]){255, 0, 0, 255}, "the first attachment's snapshot holds its red");
+    pixels(result, 1024, (const uint8_t[]){0, 255, 0, 255}, "the second attachment's snapshot holds its green");
+    printf("feedback snapshots of one draw (%s first): %s\n", cached_first ? "cached" : "fresh", before == failed ? "PASS" : "FAIL");
+    mtl_tex_release(&a); mtl_tex_release(&b);
     for (int i = 0; i < 8; i++) { g_fbc[i] = (fb_cache_t){0}; } g_fbc_use = 0;
 }
 // A pool shader may name any registered texture, the depth attachment too, so it counts as reading the attachment (and a later draw writing depth ends the pass) only once a shader has read that
@@ -472,6 +549,9 @@ static void cut_boundary_case(void) {
     tex_t colour; target(&colour, 99810);
     id<MTLBuffer> rep = [g_dev newBufferWithLength:64 options:MTLResourceStorageModeShared]; res_add(rep);
     CHECK(ts_on(), "segment mode has a timestamp heap");
+    // nothing of the cases before this one may still be on its way: a submission the encode thread kept open for the next one (merged submissions) reports back a moment later than
+    // one committed at once, and the case counts g_seg_inflight itself
+    rec_drain(); for (int i = 0; i < 20000 && atomic_load(&g_seg_inflight); i++) usleep(100);
     state_reset(); memset(&R, 0, sizeof R); mtl_sub_begin();
     R.has_rt = 1; R.rt.n = 1; R.rt.color[0] = &colour;
     clear(MTLClearColorMake(0, 0, 0, 1)); rp_end();
@@ -490,6 +570,68 @@ static void cut_boundary_case(void) {
     CHECK(mtl_wait(mtl_sub_commit(), 5000000000ull), "the segments completed");
     uint64_t r0[2], r1[2]; memcpy(r0, rep.contents, 16); memcpy(r1, (uint8_t *)rep.contents + 16, 16);
     CHECK(r0[1] && r1[1] > r0[1], "two reports in one command buffer read two times");
+}
+
+// With Metal encoding on its own thread, submissions that reach it while the GPU still runs an earlier command buffer are held and go to the queue in one commit call (nvn_rec.h,
+// held submissions): their notes and signals follow it, and each one's reports still read its own part of the GPU time. Anything else for the queue recorded inside a later
+// submission (an upload batch, here a queue block) goes after the held ones and before that submission's own command buffer, as when each was committed on its own: the first
+// version continued the next submission in the held command buffer, and an upload recorded inside it went to the GPU after the draws recorded before it. The encode thread is held
+// by a queue block until the submissions are recorded, and "an earlier command buffer runs" is the counter raised by hand
+static void merge_case(void) {
+    if (!rec_on()) return;
+    tex_t colour; target(&colour, 99820);
+    id<MTLBuffer> rep = [g_dev newBufferWithLength:64 options:MTLResourceStorageModeShared]; res_add(rep);
+    rec_drain(); for (int i = 0; i < 20000 && (atomic_load(&g_rx_fly) || atomic_load(&g_seg_inflight)); i++) usleep(100);
+    uint64_t cbs0 = g_rx_cbs, merged0 = g_rx_merged;
+    dispatch_semaphore_t gate = dispatch_semaphore_create(0);
+    atomic_fetch_add(&g_rx_busy_hold, 1);
+    rec_queue_block(^{ dispatch_semaphore_wait(gate, DISPATCH_TIME_FOREVER); }); rec_publish();
+    uint64_t f[3];
+    for (int k = 0; k < 3; k++) {
+        state_reset(); memset(&R, 0, sizeof R); mtl_sub_begin();
+        R.has_rt = 1; R.rt.n = 1; R.rt.color[0] = &colour;
+        clear(MTLClearColorMake(k == 0, k == 1, k == 2, 1)); rp_end();
+        mtl_sub_counter((uint64_t)rep.contents + 16 * (uint64_t)k, 0);   // a timestamp at the end of its (only) segment: its command buffer's end, or its own part of a shared one
+        f[k] = mtl_sub_commit();
+    }
+    dispatch_semaphore_signal(gate);
+    // (polled, not waited for: a waiter that wakes on the queue's signal completes the records itself, with its own clock for every report: post_early)
+    for (int i = 0; i < 50000 && g_done < f[2]; i++) usleep(100);
+    CHECK(g_done >= f[2], "three submissions behind running work complete");
+    atomic_fetch_sub(&g_rx_busy_hold, 1);
+    rec_drain();
+    CHECK(g_rx_merged - merged0 == 3 && g_rx_cbs - cbs0 == 1, "they went to the queue in one commit");
+    CHECK(atomic_load(&g_sub_cmt) >= f[2], "their commit notes are passed");
+    uint64_t r[3][2]; memcpy(r, rep.contents, sizeof r);
+    CHECK(r[0][1] && r[1][1] >= r[0][1] && r[2][1] >= r[1][1] && r[2][1] > r[0][1], "each one's report reads its own end, not the shared command buffer's");
+    // a queue operation recorded inside the next submission, after its first pass: the held submission goes to the queue before it, and that submission's own command buffer,
+    // which holds the pass, after it (an upload batch flushed in the middle of a submission is committed before the draws it serves, wherever in the submission they were recorded)
+    rec_drain(); for (int i = 0; i < 20000 && (atomic_load(&g_rx_fly) || atomic_load(&g_seg_inflight)); i++) usleep(100);
+    cbs0 = g_rx_cbs; merged0 = g_rx_merged; __block uint64_t held_at_block = ~0ull; __block int pend_at_block = -1, nb_at_block = -1;
+    atomic_fetch_add(&g_rx_busy_hold, 1);
+    rec_queue_block(^{ dispatch_semaphore_wait(gate, DISPATCH_TIME_FOREVER); }); rec_publish();
+    state_reset(); memset(&R, 0, sizeof R); mtl_sub_begin(); R.has_rt = 1; R.rt.n = 1; R.rt.color[0] = &colour; clear(MTLClearColorMake(1, 1, 0, 1)); rp_end(); uint64_t fa = mtl_sub_commit();
+    state_reset(); memset(&R, 0, sizeof R); mtl_sub_begin(); R.has_rt = 1; R.rt.n = 1; R.rt.color[0] = &colour; clear(MTLClearColorMake(0, 1, 1, 1)); rp_end();
+    rec_queue_block(^{ held_at_block = g_rx_cbs; pend_at_block = g_rx_npend; nb_at_block = g_rx_last_nb; }); rec_publish();
+    clear(MTLClearColorMake(1, 0, 1, 1)); rp_end(); uint64_t fb2 = mtl_sub_commit();
+    dispatch_semaphore_signal(gate);
+    atomic_fetch_sub(&g_rx_busy_hold, 1);
+    CHECK(mtl_wait(fb2, 5000000000ull), "the submissions around a queue operation complete");
+    rec_drain();
+    CHECK(pend_at_block == 0 && held_at_block == cbs0 + 1 && g_rx_merged - merged0 >= 1 && fa < fb2, "the held submission was committed before the queue operation ran");
+    CHECK(nb_at_block == 1, "and alone: the next submission's pass recorded before the queue operation was not in that commit");
+    // the GPU has run out of work but the commit feedback has not reported it yet (its count held up here): the next submission is not held, as the GPU is read through the
+    // encode thread's event (DM_NVN_SUB_IDLE_FB=1 reads that count and holds it)
+    rec_drain(); for (int i = 0; i < 20000 && (atomic_load(&g_rx_fly) || atomic_load(&g_seg_inflight)); i++) usleep(100);
+    for (int i = 0; i < 20000 && g_rx_ev && g_rx_ev.signaledValue < g_rx_seq; i++) usleep(100);
+    cbs0 = g_rx_cbs; merged0 = g_rx_merged;
+    atomic_fetch_add(&g_rx_fly, 1);
+    state_reset(); memset(&R, 0, sizeof R); mtl_sub_begin(); R.has_rt = 1; R.rt.n = 1; R.rt.color[0] = &colour; clear(MTLClearColorMake(0, 0, 1, 1)); rp_end(); uint64_t fi = mtl_sub_commit();
+    for (int i = 0; i < 50000 && g_done < fi; i++) usleep(100);   // (polled: a drain would send it at once either way)
+    CHECK(g_done >= fi, "a submission after the GPU's work ended completes");
+    atomic_fetch_sub(&g_rx_fly, 1);
+    const char *fbm = getenv("DM_NVN_SUB_IDLE_FB");
+    if (!(fbm && !strcmp(fbm, "1"))) CHECK(g_rx_merged == merged0 && g_rx_cbs == cbs0 + 1, "the GPU is idle before its feedback reports it: the submission went at once, not held");
 }
 
 // Output-mapping-only fixture (no rewritable sample): main0 writes magenta to color(0); main0_f remaps
@@ -713,7 +855,12 @@ int main(int argc, char **argv) { @autoreleasepool {
     for (int pending = 0; pending < 2; pending++) for (int stencil = 0; stencil < 2; stencil++) { real_depth_snap_case(pr, 1, stencil, pending); real_depth_snap_case(pr, 0, stencil, pending); }
     pending_clear_case(pr);
     shape_case();
+    same_draw_case(0); same_draw_case(1);
     mip_chain_case(pr);
+    // A texture named by one handle in a uniform buffer (FINAL FANTASY XII THE ZODIAC AGE's limit-break echo): before fb_prepare took TEXU bindings, the draw read the attachment itself
+    if (posix_memalign((void **)&g_ubo_words, getpagesize(), getpagesize())) abort(); memset(g_ubo_words, 0, getpagesize()); mtl_pool_add(g_ubo_words, getpagesize());
+    fs->rf.b[0] = (nvn_rbind){.kind=NVN_RB_TEXU, .aid=0, .dtt=MTLTextureType2D}; slot_case(pr, pipeline, 2, 4);
+    fs->rf.b[0] = (nvn_rbind){.kind=NVN_RB_TEX, .aid=0, .dtt=MTLTextureType2D};
     fs->fn = [lib newFunctionWithName:@"mask"];
     fs->ae = [fs->fn newArgumentEncoderWithBufferIndex:0]; fs->arg_len = fs->ae.encodedLength;
     fs->rf.b[0] = (nvn_rbind){.kind=NVN_RB_IMG, .aid=0, .dtt=MTLTextureType2D, .dpf=NVN_DPF_UINT};
@@ -727,6 +874,7 @@ int main(int argc, char **argv) { @autoreleasepool {
     pool_depth_case();
     reuse_tables_case();
     cut_boundary_case();
+    merge_case();
     printf("feedback snapshot: %d checks, %d failed\n", checks, failed);
     return failed != 0;
 } }

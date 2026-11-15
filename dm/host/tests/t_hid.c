@@ -686,6 +686,7 @@ static void t_touch_sampling(void) {
     const int modes[] = {1, 1, 0, 0, 1, 0};
     for (int i = 0; i < 6; i++) {
         g_mode = modes[i]; memset(s, 0, sizeof s);
+        test_frame++;   // one read per presented frame: the sample is published once a frame
         if (i & 1) CHECK(h_hid_TouchN_16(s, 1) == 1, "touch: GetTouchScreenStates gives one state");
         else h_hid_Touch1_16(s);
         memcpy(&v, s, 8);
@@ -694,6 +695,15 @@ static void t_touch_sampling(void) {
                                 : i == 5 ? "touch: handheld again continues the sampling numbers" : "touch: sampling numbers increase");
         prev = v;
     }
+    // One complete sample is published per guest frame and copied whole to every reader, so two
+    // readers in one frame see the same sampling number and the same Start / End edges (issue #2567:
+    // Animal Crossing's input manager and its own keyboard both read; the second used to see a held point).
+    uint8_t s2[sizeof s]; int64_t a, b;
+    g_mode = 0; memset(s, 0, sizeof s); memset(s2, 0, sizeof s2); test_frame++;
+    h_hid_Touch1_16(s); h_hid_Touch1_16(s2);
+    memcpy(&a, s, 8); memcpy(&b, s2, 8);
+    CHECK(a == b, "touch: two readers in one guest frame share the sampling number");
+    CHECK(memcmp(s, s2, sizeof s) == 0, "touch: two readers in one guest frame get the same sample");
     g_mode = 1;
 }
 
@@ -1170,6 +1180,29 @@ static void t_pair_half_pause(void) {
     h_hid_SetStyles(0xffffffffu); h_hid_ImuDisable(); guest_now = motion_now = 1000000000ull; g_phone_mode = -1;
 }
 
+// A whole pad whose Joy-Cons a front end reports one by one without taking over its buttons (dm_joy_motion; the Mac
+// front end's original Joy-Cons): each handle of the JoyDual npad reads its own Joy-Con. A side attached without a
+// stream of its own falls back to the pad's merged stream, so one Joy-Con alone still drives both handles.
+static void t_joy_motion_wide(void) {
+    g_mode = 1; dm_pad_players(1); g_phone_mode = 0; hwm_clear(); setenv("DM_IMU_NOISE", "0", 1); imu_env_read();
+    uint64_t t = 900000000000ull; motion_now = guest_now = t;
+    uint8_t ring[64]; h_hid_ImuEnable(ring, sizeof ring);
+    h_hid_SetStyles(STYLE_HANDHELD | STYLE_JOYDUAL);
+    float a[3] = {0, 0, -1}, wl[3] = {0, 0.3f, 0}, wr[3] = {0, 0.7f, 0}, side[3] = {0.5f, 0, 0};
+    TestImuSample q[1];
+    dm_joy_motion(0, 3); dm_motion_set_joy(0, 0, a, wl, t); dm_motion_set_joy(0, 1, a, wr, t); dm_motion_set_hid(0, a, side, t);
+    CHECK(h_hid_ImuSamples(q, 1, 0x5) == 1 && fabsf(q[0].gyro[1] + 0.3f) < 1e-4f, "wide pair: device 0 reads the left Joy-Con's own stream");
+    CHECK(h_hid_ImuSamples(q, 1, 0x10005) == 1 && fabsf(q[0].gyro[1] + 0.7f) < 1e-4f, "wide pair: device 1 reads the right one's");
+    CHECK(h_hid_ImuSamples(q, 1, 0x10005) == 1 && fabsf(q[0].gyro[0]) < 1e-4f, "wide pair: neither handle sees the merged stream's sideways frame");
+    dm_joy_motion(0, 2); motion_now = guest_now = (t += 1000000);   // the left one gone: the right alone, merged stream for both handles
+    dm_motion_set_joy(0, 1, a, wr, t); dm_motion_set_hid(0, a, side, t);
+    CHECK(h_hid_ImuSamples(q, 1, 0x5) == 1 && fabsf(q[0].gyro[0] + 0.5f) < 1e-4f, "one Joy-Con wide: the handle without a stream falls back to the merged one");
+    CHECK(h_hid_ImuSamples(q, 1, 0x10005) == 1 && fabsf(q[0].gyro[1] + 0.7f) < 1e-4f, "one Joy-Con wide: the other keeps its own");
+    dm_joy_motion(0, 0); dm_motion_clear_joy(0, 0); dm_motion_clear_joy(0, 1); dm_motion_clear_hid(0);
+    unsetenv("DM_IMU_NOISE"); imu_env_read();
+    h_hid_SetStyles(0xffffffffu); h_hid_ImuDisable(); guest_now = motion_now = 1000000000ull; g_phone_mode = -1;
+}
+
 // Playout delay (DM_IMU_DELAY, motion_lag): a live stream at 33 Hz (Joy-Con 2: sample times from the controller's clock, arrivals up to 4 ms late) or 67 Hz (GameController:
 // sample times are the jittered arrivals). The signal is a ramp of the gyro (1 rad/s per second of sample time), so a tick reads its data time: exactly the ramp at its time
 // minus the delay when it lies between two real samples, less when it holds one. The game reads 16 ticks every 16.7 ms and takes each tick once (by sampling number), as the
@@ -1596,6 +1629,7 @@ int main(void) {
     t_imu_conversion();
     t_live_pinned();
     t_pair_half_pause();
+    t_joy_motion_wide();
     t_six_ic_info();
     t_touch_sampling();
     t_rec();
