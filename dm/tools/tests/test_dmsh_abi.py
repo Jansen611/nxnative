@@ -20,9 +20,10 @@ import dmsh_abi as abi   # noqa: E402
 # where it is not the push constant block's size (DMSH_PUSH_SIZE): a viewport swizzle value in nvn_mtl.m, the start of compute code in a package record in dmsh_build.py,
 # a single texture bind record's flag bit in nvn_obj.h (BIND_TEX1_NOBASE).
 # 0x1000 where it is not the pool table's entry count (DMSH_GMEM_MAP_ENTRIES): the 4 KB page step of nvn_mtl.m's sparse residency map.
+# 0x210 in nvn_mtl.m is the game's vertex uniform offset for a widescreen gradient, not the compute uniform table.
 # A count may only go down; when it does, lower it here.
 BASELINE = {
-    'dm/gfx/nvn/nvn_mtl.m': {"'geometry'": 3, '0x100': 2, '0x1000': 2},
+    'dm/gfx/nvn/nvn_mtl.m': {"'geometry'": 3, '0x100': 2, '0x210': 1, '0x1000': 2},
     'dm/gfx/nvn/nvn_refl.m': {"'c1'": 1},
     'dm/gfx/nvn/nvn_refl.h': {},
     'dm/gfx/nvn/nvn_obj.h': {'0x100': 1},

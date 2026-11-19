@@ -15158,6 +15158,24 @@ static int skip_fs_draw(NvProg *pr) {
     return 0;
 }
 static void draw(const p_draw *dw, const p_draw_idx *di) { cp_stamp start = cp_begin(); if (dw && dw->prim == DM_PRIM_MESH_TASKS) mesh_tasks_draw(dw); else draw_(dw, di); cp_end(5, start); }
+static int IsWideGradient(NvProg *program, const tex_t *texture) {
+    if (texture->d.width != 256 || texture->d.height != 512 || !program->sh[0] || !program->sh[1] ||
+        strncmp(program->sh[0]->key, "71018be49e22ab4a", 16) || strncmp(program->sh[1]->key, "e6a88e12dbae9743", 16)) return 0;
+    const p_bind_buf *vertex = &S.ubo[0][0], *fragment = &S.ubo[1][0];
+    if (!vertex->addr || vertex->size < 0x218 || !fragment->addr || fragment->size < 16 ||
+        pend_hits(vertex->addr, vertex->size) || pend_hits(fragment->addr, fragment->size) ||
+        (g_nubd && (ubd_hits(vertex->addr, vertex->addr + vertex->size) || ubd_hits(fragment->addr, fragment->addr + fragment->size)))) return 0;
+    void *vertexBuffer, *fragmentBuffer; uint64_t vertexOffset, fragmentOffset, gpu;
+    if (!mtl_gpu_addr(vertex->addr, vertex->size, &vertexBuffer, &vertexOffset, &gpu) ||
+        !mtl_gpu_addr(fragment->addr, fragment->size, &fragmentBuffer, &fragmentOffset, &gpu)) return 0;
+    const void *vertexContents = [(__bridge id<MTLBuffer>)vertexBuffer contents];
+    const void *fragmentContents = [(__bridge id<MTLBuffer>)fragmentBuffer contents];
+    if (!vertexContents || !fragmentContents) return 0;
+    float bounds[2], colour[3];
+    memcpy(bounds, (const char *)vertexContents + vertexOffset + 0x210, sizeof bounds);
+    memcpy(colour, (const char *)fragmentContents + fragmentOffset, sizeof colour);
+    return bounds[0] == 1280 && bounds[1] == 1280 && colour[0] == 0 && colour[1] == 0 && colour[2] == 0;
+}
 static void draw_(const p_draw *dw, const p_draw_idx *di) {
     g_draw_binst = (uint32_t)(dw ? dw->base_instance : di ? di->base_instance : 0);   // c0 + 0x644 of the stages that read the driver segment (encode_args)
     if (passdump()) { NvProg *p = g_geo_program ? g_geo_program : S.prog ? prog_get(S.prog) : nil;
@@ -15279,6 +15297,19 @@ static void draw_(const p_draw *dw, const p_draw_idx *di) {
     if (g_enc && g_sm_pass && draw_samples_rt(pr)) { PD("M %llu a draw in the slice-merged pass samples its attachment; split here", g_stat_pass); rp_end(); }
     if (g_enc && g_sm_pass && g_wl.on) { PD("M %llu a wide line in the slice-merged pass: split here", g_stat_pass); rp_end(); }   // its pipeline is not amplified (wl_pso)
     if (!g_enc && mode == 0 && !g_rp_layered && !defer_q_draw && g_exec_next && !tbdr_on() && !g_geo_program && !g_wl.on && sm_on()) sm_plan(pr);
+    if (!g_enc && dm_game_aspect() > 16.0 / 9.0 && R.rt.n > 0 && R.rt.color[0] &&
+        (R.rt.color[0]->serial == g_aspect_canvas ||
+         (g_aspect_canvas_w && R.rt.color[0]->d.width == g_aspect_canvas_w && R.rt.color[0]->d.height == g_aspect_canvas_h)) &&
+        (dw ? dw->count : di ? di->count : 0) == 6) {
+        int textureId = (int)(S.tex[1][0] & 0xfffff);
+        os_unfair_lock_lock(&g_rmu);
+        if (textureId > 0 && textureId < g_ntreg && g_treg[textureId].ok) {
+            const tex_t *texture = &g_treg[textureId].t;
+            if (texture->d.width >= 320 && texture->d.height && fabs((double)texture->d.width / texture->d.height * 9 / 16 - 1) < 0.02)
+                tex_by_id(textureId);
+        }
+        os_unfair_lock_unlock(&g_rmu);
+    }
     vbuf_prepare(pr->sh[0] ? &pr->sh[0]->rf : NULL, dw, di);   // an unaligned GPU-written stream, or one the draw reads past, needs its ordered copy before the render encoder
     id<MTLRenderCommandEncoder> en = rp_begin_ex(mode);
     g_rp_layered = 0; g_sm_plan.on = 0;
@@ -15345,6 +15376,15 @@ static void draw_(const p_draw *dw, const p_draw_idx *di) {
             const tex_t *texture = &g_treg[textureId].t;
             scenePicture = texture->d.width >= 320 && texture->d.height &&
                 fabs((double)texture->d.width / texture->d.height * 9 / 16 - 1) < 0.02 && mtl_tex_gpu_owned(texture->serial);
+            if (!scenePicture && texture->d.width >= 320 && texture->d.height &&
+                fabs((double)texture->d.width / texture->d.height * 9 / 16 - 1) < 0.02 &&
+                texture->pool && !g_treg[textureId].gone && !texture->has_layout && !tex_cpu_written(texture->serial) && !nvn_sparse_pool(texture->pool)) {
+                alias_key key = tex_alias_key(texture);
+                id shared = own_alias_peek(&key);
+                if ([shared conformsToProtocol:@protocol(MTLTexture)])
+                    scenePicture = (((id<MTLTexture>)shared).usage & (MTLTextureUsageRenderTarget | MTLTextureUsageShaderWrite)) != 0;
+            }
+            if (!scenePicture) scenePicture = IsWideGradient(pr, texture);
         }
         os_unfair_lock_unlock(&g_rmu);
         if (!scenePicture) aspectScale = (16.0 / 9.0) / effectiveAspect;
