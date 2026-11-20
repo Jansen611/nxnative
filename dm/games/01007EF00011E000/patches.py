@@ -214,6 +214,18 @@ def frame_step(ctx):
         fs_put(site, [B(site, start)], why)
     cam_fovy(0x10ee094, '007440bd', 0, 'main camera fovy getter: widened like the projection (culling tests)')
     cam_fovy(0x10ee0cc, '007440bd', 0x16a0000, 'main camera fovy getter in degrees: widened like the projection')
+    fs_site(0xeb4a44, '009840bd')
+    start = here(); emit(ADRP(8, here(), FS_STATE_OFF))
+    for word in (0x91081108, 0x88dffd0b, 0x5291c72a, 0x72a7fc6a, 0x6b0a017f, 0x540003c9,
+                 0xb940a009, 0x5281524a, 0x72a7e0ca, 0x6b0a013f, 0x54000321,
+                 0xb940b009, 0x5291c72a, 0x72a7fc6a, 0x6b0a013f, 0x54000283,
+                 0xb940b409, 0x528147aa, 0x72b7d2ea, 0x6b0a013f, 0x540001e1,
+                 0xb940b809, 0x529ae14a, 0x72b7746a, 0x6b0a013f, 0x54000141,
+                 0xb900b00b, 0x1e270170, 0x5291c72a, 0x72a7fc6a, 0x1e270151,
+                 0x1e301a31, 0xbd40b410, 0x1e310a10, 0xbd00b410, 0xbd409800):
+        emit(word)
+    emit(B(here(), 0xeb4a48))
+    fs_put(0xeb4a44, [B(0xeb4a44, start)], 'inventory preview projection: use the widescreen aspect and preserve its centre offset')
     # The HUD's projection still came out 16:9 (its aspect is stored by other code too), so sead::PerspectiveProjection::doUpdateMatrix (main+0xeb4a44) builds the matrix of
     # a 16:9 projection with near 1 and far 10000, the HUD camera's, with the screen's ratio and tan(half angle) x k: the same widened vertical angle, nothing else changed.
     # State +0x74 float 16/9, +0x78 float its tolerance, +0x7c float 10000.0
@@ -554,12 +566,14 @@ BINDING = [
      'why': "the camera writer is verified for this game's 1.9.0 main", 'blocked': 'the camera stub has no function-matched form yet'},
     {'what': 'screen capture rectangle follows widescreen UI compensation', 'now': 'build', 'goal': 'game', 'purpose': 'rendering',
      'why': "the capture calls and their stack arguments belong to this game's layout code", 'blocked': 'the capture stubs have no function-matched form yet'},
+    {'what': 'inventory preview widescreen projection', 'now': 'build', 'goal': 'game', 'purpose': 'rendering',
+     'why': 'the preview projection signature was checked on the 1.9.0 build', 'blocked': 'the projection signature and site have not been checked on another build'},
     {'what': 'interval controller: the lower bound and the GPU-time path', 'now': 'build', 'goal': 'game', 'purpose': 'frame rate',
      'why': "sead::GameFrameworkNx's interval controller in this build; Tears of the Kingdom shares sead but not this code"},
     {'what': '60 fps frame step and render scale (ksys::VFR)', 'now': 'build', 'goal': 'game', 'purpose': 'frame rate',
      'why': "the game's own frame code; the frame-step state page is general. No engine sibling shares it: none of its 34 functions has an exact match in Tears of the "
             'Kingdom, SMO, MK8D, ACNH, Splatoon 2 / 3, Kirby, Mario Party, Ocarina, Smash, Metroid Dread or Origami King (only the widescreen stubs\' sead::PerspectiveProjection '
             'functions recur)',
-     'checked': 'nso_fnmap of its 44 sites into those 13 mains (2026-11-09)',
-     'kept': '44 sites in 34 functions to fingerprint for an update that may not come (1.9.0, the Switch 2 Edition release); convert when a new build appears'},
+    'checked': 'nso_fnmap of its original 44 sites into those 13 mains (2026-11-09)',
+    'kept': '45 sites in 34 functions to fingerprint for an update that may not come (1.9.0, the Switch 2 Edition release); convert when a new build appears'},
 ]
