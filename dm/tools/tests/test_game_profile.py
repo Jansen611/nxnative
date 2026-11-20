@@ -24,6 +24,76 @@ def header(rows):
     return r.returncode, (r.stderr + r.stdout).strip()
 
 
+class WideCanvas(unittest.TestCase):
+    def test_validation(self):
+        self.assertEqual(header('wide_canvas\trgb10a2 640\n'), (0, ''))
+        for row in ('wide_canvas\tinvalid 640\n', 'wide_canvas\trgb10a2 0\n', 'wide_canvas\trgb10a2 text\n', 'wide_canvas\trgb10a2\n'):
+            rc, out = header(row)
+            self.assertNotEqual(rc, 0, row)
+            self.assertIn('wide_canvas requires', out)
+
+    def test_rule_is_opt_in(self):
+        with tempfile.TemporaryDirectory() as directory:
+            profile = Path(directory, ID); profile.mkdir()
+            path = profile / 'game.tsv'
+            output = profile / 'game.h'
+            env = {**os.environ, 'DM_GAMES_DIR': directory}
+            path.write_text(TSV)
+            subprocess.run([sys.executable, str(GAME), 'header', ID, str(output)], env=env, check=True, capture_output=True)
+            self.assertNotIn('DM_GAME_WIDE_CANVAS', output.read_text())
+            path.write_text(TSV + 'wide_canvas\trgb10a2 640\n')
+            subprocess.run([sys.executable, str(GAME), 'header', ID, str(output)], env=env, check=True, capture_output=True)
+            self.assertIn('#define DM_GAME_WIDE_CANVAS_MIN_WIDTH 640', output.read_text())
+
+
+class WideGradient(unittest.TestCase):
+    def test_validation(self):
+        valid = 'wide_gradient\t71018be49e22ab4a e6a88e12dbae9743 256 512 0x210 1280\n'
+        self.assertEqual(header(valid), (0, ''))
+        for row in ('wide_gradient\tbad e6a88e12dbae9743 256 512 0x210 1280\n',
+                    'wide_gradient\t71018be49e22ab4a e6a88e12dbae9743 0 512 0x210 1280\n',
+                    'wide_gradient\t71018be49e22ab4a e6a88e12dbae9743 256 512 -1 1280\n',
+                    'wide_gradient\t71018be49e22ab4a e6a88e12dbae9743 256 512 0x210\n'):
+            rc, out = header(row)
+            self.assertNotEqual(rc, 0, row)
+            self.assertIn('wide_gradient requires', out)
+
+    def test_rule_is_opt_in(self):
+        with tempfile.TemporaryDirectory() as directory:
+            profile = Path(directory, ID); profile.mkdir()
+            path = profile / 'game.tsv'
+            output = profile / 'game.h'
+            env = {**os.environ, 'DM_GAMES_DIR': directory}
+            path.write_text(TSV)
+            subprocess.run([sys.executable, str(GAME), 'header', ID, str(output)], env=env, check=True, capture_output=True)
+            self.assertNotIn('DM_GAME_WIDE_GRADIENT', output.read_text())
+            path.write_text(TSV + 'wide_gradient\t71018be49e22ab4a e6a88e12dbae9743 256 512 0x210 1280\n')
+            subprocess.run([sys.executable, str(GAME), 'header', ID, str(output)], env=env, check=True, capture_output=True)
+            text = output.read_text()
+            self.assertIn('#define DM_GAME_WIDE_GRADIENT_VS "71018be49e22ab4a"', text)
+            self.assertIn('#define DM_GAME_WIDE_GRADIENT_OFFSET 528', text)
+
+    def test_multi_program_rule_is_per_program(self):
+        sys.path.insert(0, str(REPO / 'dm/games'))
+        import game
+        with tempfile.TemporaryDirectory() as directory:
+            first = Path(directory, ID); first.mkdir()
+            second = Path(directory, '0100000000F0F001'); second.mkdir()
+            (first / 'game.tsv').write_text(TSV)
+            (second / 'game.tsv').write_text(TSV.replace(ID, second.name) +
+                'wide_canvas\trgb10a2 640\n' +
+                'wide_gradient\t71018be49e22ab4a e6a88e12dbae9743 256 512 0x210 1280\n')
+            text = game.header_multi([(0, game.Game(first)), (1, game.Game(second))])
+            first_row = next(line for line in text.splitlines() if line.startswith('    {.program = 0,'))
+            second_row = next(line for line in text.splitlines() if line.startswith('    {.program = 1,'))
+            self.assertNotIn('.wide_gradient_vs =', first_row)
+            self.assertNotIn('.wide_canvas_format =', first_row)
+            self.assertIn('.wide_gradient_vs = "71018be49e22ab4a"', second_row)
+            self.assertIn('.wide_canvas_format = "rgb10a2"', second_row)
+            self.assertIn('#define DM_GAME_WIDE_GRADIENT_VS (dm_game_cur()->wide_gradient_vs)', text)
+            self.assertIn('#define DM_GAME_WIDE_CANVAS_FORMAT (dm_game_cur()->wide_canvas_format)', text)
+
+
 class PsoGPU(unittest.TestCase):
     def test_valid_tokens(self):
         for rows in ('', 'pso_mtl4\ton\npso_gpu\tg18p\n', 'pso_mtl4\ton\npso_gpu\tapplegpu_g19p\n',   # without the key: the header is made as before, no message

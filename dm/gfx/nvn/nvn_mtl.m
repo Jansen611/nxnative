@@ -5463,11 +5463,18 @@ static int pf_is_float(MTLPixelFormat f) {   // Float color formats that can sto
     switch (f) { case MTLPixelFormatR16Float: case MTLPixelFormatRG16Float: case MTLPixelFormatRGBA16Float: case MTLPixelFormatR32Float:
         case MTLPixelFormatRG32Float: case MTLPixelFormatRGBA32Float: case MTLPixelFormatRG11B10Float: return 1; default: return 0; }
 }
-// Remember the final depth-free BOTW canvas before it is copied to the swapchain.
+// Remember the profile's final depth-free canvas before it is copied to the swapchain.
 // Adapted from MacNativeGames (MIT); the full licence is in the BOTW profile's patches.py.
-static uint64_t g_aspect_canvas, g_aspect_last_canvas;
-static NSUInteger g_aspect_canvas_w, g_aspect_canvas_h, g_aspect_last_w, g_aspect_last_h;
+static uint64_t g_aspect_canvas;
+static NSUInteger g_aspect_canvas_w, g_aspect_canvas_h;
+#ifdef DM_GAME_WIDE_CANVAS_FORMAT
+static uint64_t g_aspect_last_canvas;
+static NSUInteger g_aspect_last_w, g_aspect_last_h;
+#endif
 static void LearnAspectCanvas(MTL4RenderPassDescriptor *descriptor) {
+#ifdef DM_GAME_WIDE_CANVAS_FORMAT
+    const char *canvasFormat = DM_GAME_WIDE_CANVAS_FORMAT;
+    if (!canvasFormat || strcmp(canvasFormat, "rgb10a2")) return;
     if (!(dm_game_aspect() > 0) || R.rt.n < 1 || !R.rt.color[0]) return;
     const tex_t *target = R.rt.color[0];
     id<MTLTexture> texture = descriptor.colorAttachments[0].texture;
@@ -5476,11 +5483,14 @@ static void LearnAspectCanvas(MTL4RenderPassDescriptor *descriptor) {
             g_aspect_canvas = g_aspect_last_canvas;
             g_aspect_canvas_w = g_aspect_last_w; g_aspect_canvas_h = g_aspect_last_h;
         }
-    } else if (texture && texture.pixelFormat == MTLPixelFormatRGB10A2Unorm && texture.width >= 640 && texture.height &&
+    } else if (texture && texture.pixelFormat == MTLPixelFormatRGB10A2Unorm && texture.width >= DM_GAME_WIDE_CANVAS_MIN_WIDTH && texture.height &&
                fabs((double)texture.width / texture.height * 9 / 16 - 1) < 0.01 && !descriptor.colorAttachments[0].level && !descriptor.depthAttachment.texture) {
         g_aspect_last_canvas = target->serial; g_aspect_last_w = texture.width; g_aspect_last_h = texture.height;
         if (texture.width == g_aspect_canvas_w && texture.height == g_aspect_canvas_h) g_aspect_canvas = target->serial;
     }
+#else
+    (void)descriptor;
+#endif
 }
 static int fz_load_covers(int i, id<MTLTexture> t, NSUInteger level);
 static NSMutableArray *g_lp;    // DM_NVN_LOADPROBE=1 / 2 / 3 (two constant sentinel values / NaN - under float formats normal shader output cannot reach NaN, ruling out numeric coincidence): attachments judged elidable are cleared to the sentinel color instead, and at pass end the remaining sentinel pixels are read back and counted (diagnostic: should be 0)
@@ -15159,10 +15169,12 @@ static int skip_fs_draw(NvProg *pr) {
 }
 static void draw(const p_draw *dw, const p_draw_idx *di) { cp_stamp start = cp_begin(); if (dw && dw->prim == DM_PRIM_MESH_TASKS) mesh_tasks_draw(dw); else draw_(dw, di); cp_end(5, start); }
 static int IsWideGradient(NvProg *program, const tex_t *texture) {
-    if (texture->d.width != 256 || texture->d.height != 512 || !program->sh[0] || !program->sh[1] ||
-        strncmp(program->sh[0]->key, "71018be49e22ab4a", 16) || strncmp(program->sh[1]->key, "e6a88e12dbae9743", 16)) return 0;
+#ifdef DM_GAME_WIDE_GRADIENT_VS
+    const char *vertexKey = DM_GAME_WIDE_GRADIENT_VS, *fragmentKey = DM_GAME_WIDE_GRADIENT_FS;
+    if (!vertexKey || !fragmentKey || texture->d.width != DM_GAME_WIDE_GRADIENT_WIDTH || texture->d.height != DM_GAME_WIDE_GRADIENT_HEIGHT ||
+        !program->sh[0] || !program->sh[1] || strncmp(program->sh[0]->key, vertexKey, 16) || strncmp(program->sh[1]->key, fragmentKey, 16)) return 0;
     const p_bind_buf *vertex = &S.ubo[0][0], *fragment = &S.ubo[1][0];
-    if (!vertex->addr || vertex->size < 0x218 || !fragment->addr || fragment->size < 16 ||
+    if (!vertex->addr || vertex->size < DM_GAME_WIDE_GRADIENT_OFFSET + 2 * sizeof(float) || !fragment->addr || fragment->size < 16 ||
         pend_hits(vertex->addr, vertex->size) || pend_hits(fragment->addr, fragment->size) ||
         (g_nubd && (ubd_hits(vertex->addr, vertex->addr + vertex->size) || ubd_hits(fragment->addr, fragment->addr + fragment->size)))) return 0;
     void *vertexBuffer, *fragmentBuffer; uint64_t vertexOffset, fragmentOffset, gpu;
@@ -15172,9 +15184,13 @@ static int IsWideGradient(NvProg *program, const tex_t *texture) {
     const void *fragmentContents = [(__bridge id<MTLBuffer>)fragmentBuffer contents];
     if (!vertexContents || !fragmentContents) return 0;
     float bounds[2], colour[3];
-    memcpy(bounds, (const char *)vertexContents + vertexOffset + 0x210, sizeof bounds);
+    memcpy(bounds, (const char *)vertexContents + vertexOffset + DM_GAME_WIDE_GRADIENT_OFFSET, sizeof bounds);
     memcpy(colour, (const char *)fragmentContents + fragmentOffset, sizeof colour);
-    return bounds[0] == 1280 && bounds[1] == 1280 && colour[0] == 0 && colour[1] == 0 && colour[2] == 0;
+    return bounds[0] == DM_GAME_WIDE_GRADIENT_CANVAS && bounds[1] == DM_GAME_WIDE_GRADIENT_CANVAS && colour[0] == 0 && colour[1] == 0 && colour[2] == 0;
+#else
+    (void)program; (void)texture;
+    return 0;
+#endif
 }
 static void draw_(const p_draw *dw, const p_draw_idx *di) {
     g_draw_binst = (uint32_t)(dw ? dw->base_instance : di ? di->base_instance : 0);   // c0 + 0x644 of the stages that read the driver segment (encode_args)
