@@ -9,6 +9,7 @@
 #import <AVFAudio/AVFAudio.h>
 #include <errno.h>
 #include "front.h"
+#include "screen_shape.h"
 #include "hle.h"
 #include "dm.h"
 #include "haptics_apple.h"
@@ -150,14 +151,18 @@ static void launcher_done(void) { [g_root startGame]; }
     front_hud_env();   // before the process's first Metal device, which reads MTL_HUD_ENABLED (an env file's DM_METAL_HUD sets it in main.m already; GitHub issue #840)
     const char *dev = front_ios_device_check();   // that first device: a GPU without BC textures is refused here, not at launch, so the launcher's HUD switch counts
     if (dev) { [self showHint:[NSString stringWithFormat:@"This device is not supported.\n%s", dev]]; return; }   // the host does not start
-    {   // Picture shape "auto" (the launcher's Match screen): the app window's own shape when it is taller than 16:9 (an iPad's 4:3, an unfolded iPhone Duo's 1.43:1; loader.c
-        // takes 1.3 to 1.77), else 16:9. The window's, not the screen's: on an iPad under Stage Manager or Split View the app does not fill the screen. Resolved here, before the
-        // host writes the state page (main.c dm_fps_state_apply)
+    {
         const char *a = getenv("DM_SCREEN_ASPECT");
-        if (a && !strcmp(a, "auto")) {
-            CGSize sz = self.view.window ? self.view.window.bounds.size : UIScreen.mainScreen.bounds.size; double r = MAX(sz.width, sz.height) / MAX(MIN(sz.width, sz.height), 1);
-            char v[16]; if (r >= 1.3 && r < 1.77) snprintf(v, sizeof v, "%.3f", r); else strcpy(v, "0");
-            setenv("DM_SCREEN_ASPECT", v, 1); LOG("front end: picture shape auto: window %.0fx%.0f points (%.3f:1) → DM_SCREEN_ASPECT=%s", sz.width, sz.height, r, v);
+        if (a && *a) {
+            CGSize sz = self.view.window ? self.view.window.bounds.size : UIScreen.mainScreen.bounds.size;
+            DmScreenShapeChoice choice = DmResolveScreenShape(a, sz.width, sz.height);
+            setenv("DM_WIDESCREEN", choice.widescreen ? "1" : "0", 1);
+            if (choice.automatic) {
+                char v[32];
+                if (choice.taller) snprintf(v, sizeof v, "%.17g", choice.taller); else strcpy(v, "0");
+                setenv("DM_SCREEN_ASPECT", v, 1);
+                LOG("front end: picture shape auto: window %.0fx%.0f points, DM_SCREEN_ASPECT=%s, DM_WIDESCREEN=%d", sz.width, sz.height, v, choice.widescreen);
+            }
         }
     }
     self.fill = dm_picture_fill(getenv("DM_PICTURE_FIT"));
