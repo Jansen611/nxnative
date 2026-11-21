@@ -318,6 +318,10 @@ int main(void) { @autoreleasepool {
         id<MTLTexture> tall=[g_dev newTextureWithDescriptor:td2];
         present_shape(tall,&sa,&sb);EXPECT("a taller texture without DM_SCREEN_ASPECT: 16:9",1080,(int)sb);
         mtl_present_screen(1920,1344);present_shape(tall,&sa,&sb);EXPECT("DM_SCREEN_ASPECT: a texture that follows it keeps the taller shape",1344,(int)sb);
+        MTLTextureDescriptor *minimum=[MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm width:1920 height:1476 mipmapped:NO];minimum.storageMode=MTLStorageModePrivate;minimum.usage=MTLTextureUsageShaderRead;
+        id<MTLTexture> minimumTexture=[g_dev newTextureWithDescriptor:minimum];
+        EXPECT("minimum screen-shape texture allocated",1,minimumTexture!=nil);
+        mtl_present_screen(1920,1476);present_shape(minimumTexture,&sa,&sb);EXPECT("minimum screen shape keeps its height",1476,(int)sb);
         present_shape(sw,&sa,&sb);EXPECT("DM_SCREEN_ASPECT: a 16:9 texture of a build without stubs stays 16:9",1080,(int)sb);mtl_present_screen(0,0);
         // The front end's layout and the mouse follow the same shape, not the crop's (front_picture_shape): a real present of the 5:4 crop
         tex_t st={.magic=MAGIC('T', 'E', 'X', 0), .serial =10002};st.d.width=TW;st.d.height=TH;st.d.depth=st.d.levels=1;st.d.format=NVN_FORMAT_RGBA8;st.d.target=NVN_TEXTURE_TARGET_2D;serial_put(st.serial,sw);

@@ -13,9 +13,15 @@
 #import "DmGameMenu.h"
 #import "DuoHarnessRuntime.h"
 #include "dm_input.h"
+#include "screen_shape.h"
 #include <math.h>
 #include <stdio.h>
 void front_picture_shape(int w, int h);   // front_ios.m (dm/host/front.h)
+UIViewController *front_ios_root(void);
+
+@interface UIViewController (DuoShapeTesting)
+- (void)startGame;
+@end
 
 static NSArray<GCController *> *gDuoHarnessControllers;
 static BOOL gDuoHarnessControllerSwizzleInstalled;
@@ -45,6 +51,7 @@ static NSUInteger gDuoHarnessProbeViewClassSerial;
 
 @implementation DuoFakeTouch
 - (CGPoint)locationInView:(UIView *)view { (void)view; return self.point; }
+- (UITouchType)type { return UITouchTypeDirect; }
 @end
 
 #if DUO_HARNESS_HAS_NATIVE_POSE_API
@@ -473,6 +480,44 @@ static Class DuoHarnessInstallReservedRegionProbe(UIView *view) API_AVAILABLE(io
     CGRect wide = dm_layout(phone, UIEdgeInsetsZero, NO, CGRectNull, tall).game;
     XCTAssertEqualWithAccuracy(wide.size.height, 390, 0.001, @"A wider screen fits the taller picture by its height");
     XCTAssertEqualWithAccuracy(wide.size.width / wide.size.height, tall, 0.01, @"Never stretched");
+}
+
+- (void)testCappedWidescreenFitsWithoutStretching {
+    CGRect bounds = CGRectMake(0, 0, 2520, 1080);
+    CGFloat capped = 19.5 / 9.0;
+    DmLayout fit = dm_layout(bounds, UIEdgeInsetsZero, NO, CGRectNull, capped);
+    XCTAssertEqualWithAccuracy(fit.game.size.width, 2340, 0.001);
+    XCTAssertEqualWithAccuracy(fit.game.size.height, 1080, 0.001);
+    XCTAssertEqualWithAccuracy(CGRectGetMinX(fit.game), 90, 0.001);
+    CGRect fill = dm_layout_picture(fit, bounds, YES, capped).game;
+    XCTAssertEqualWithAccuracy(fill.size.width / fill.size.height, capped, 0.001);
+    XCTAssertTrue(CGRectContainsRect(CGRectInset(fill, -0.001, -0.001), bounds));
+}
+
+- (void)testPictureShapeOverridesOldWidescreenSwitch {
+    const char *oldShape = getenv("DM_SCREEN_ASPECT");
+    const char *oldWide = getenv("DM_WIDESCREEN");
+    NSString *savedShape = oldShape ? [NSString stringWithUTF8String:oldShape] : nil;
+    NSString *savedWide = oldWide ? [NSString stringWithUTF8String:oldWide] : nil;
+    @try {
+        for (NSString *selection in @[@"0", @"1.43", @"auto"]) {
+            setenv("DM_SCREEN_ASPECT", selection.UTF8String, 1);
+            setenv("DM_WIDESCREEN", "1", 1);
+            UIViewController *root = front_ios_root();
+            [root loadViewIfNeeded];
+            [root startGame];
+            CGSize size = UIScreen.mainScreen.bounds.size;
+            DmScreenShapeChoice expected = DmResolveScreenShape(selection.UTF8String, size.width, size.height);
+            XCTAssertEqual(atoi(getenv("DM_WIDESCREEN")), expected.widescreen);
+            if (expected.automatic && expected.taller)
+                XCTAssertEqualWithAccuracy(atof(getenv("DM_SCREEN_ASPECT")), expected.taller, 0.000001);
+            else
+                XCTAssertEqualObjects(@(getenv("DM_SCREEN_ASPECT")), expected.automatic ? @"0" : selection);
+        }
+    } @finally {
+        if (savedShape) setenv("DM_SCREEN_ASPECT", savedShape.UTF8String, 1); else unsetenv("DM_SCREEN_ASPECT");
+        if (savedWide) setenv("DM_WIDESCREEN", savedWide.UTF8String, 1); else unsetenv("DM_WIDESCREEN");
+    }
 }
 
 - (void)testProductionRootFollowsThePresentedPictureShape {
