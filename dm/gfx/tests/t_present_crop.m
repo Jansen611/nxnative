@@ -6,6 +6,7 @@
 #define g_ft g_ft_hle   // both files have a static g_ft (nvn_mtl.m's fragment argument table, hle_nvn.c's textures a flush can mark CPU-written), so hle_nvn.c's is renamed too
 #include "../nvn/hle_nvn.c"
 #undef g_ft
+#include <assert.h>
 uint64_t g_t0_ns;   // process start time from host main.c (used by hle_nvn's per-frame @t_s); unit test stub
 void *front_metal_layer(void) { return NULL; }
 module_t *module_of(const void *p) { (void)p; return NULL; }
@@ -34,6 +35,7 @@ static int check_present_resize(id<MTLTexture> src, int w, int h) {
     d.storageMode=MTLStorageModePrivate;d.usage=MTLTextureUsageRenderTarget;
     id<MTLTexture> out=[g_dev newTextureWithDescriptor:d];res_add(out);res_commit();
     id<MTL4CommandAllocator> al=[g_dev newCommandAllocator];id<MTL4CommandBuffer> cb=[g_dev newCommandBuffer];id<MTLSharedEvent> ev=[g_dev newSharedEvent];
+    assert(al && ev);
     [cb beginCommandBufferWithAllocator:al];int kind=present_encode_m4(cb,src,out,NULL,g_present_uv[0],&g_fx_present);[cb endCommandBuffer];
     [g_q4 commit:&cb count:1];[g_q4 signalEvent:ev value:1];
     EXPECT("resize present completes",1,[ev waitUntilSignaledValue:1 timeoutMS:10000]);res_remove(out);return kind;
@@ -77,9 +79,135 @@ static uint64_t display_ticket(uint64_t receipt, uint64_t before) {
     return queued;
 }
 
-int main(void) { @autoreleasepool {
-    mtl_init();
 #ifndef CROP_LEGACY_HEADER
+static void check_external_png(const char *path) {
+    NSURL *url = [NSURL fileURLWithPath:@(path)];
+    CGImageSourceRef source = CGImageSourceCreateWithURL((__bridge CFURLRef)url, NULL);
+    CGImageRef image = source ? CGImageSourceCreateImageAtIndex(source, 0, NULL) : NULL;
+    int green = 0;
+    if (image) {
+        uint8_t pixels[4 * 4 * 4];
+        CGColorSpaceRef color = CGColorSpaceCreateDeviceRGB();
+        CGContextRef ctx = CGBitmapContextCreate(pixels, 4, 4, 8, 16, color, (CGBitmapInfo)kCGImageAlphaNoneSkipLast);
+        if (ctx) {
+            CGContextDrawImage(ctx, CGRectMake(0, 0, 4, 4), image);
+            for (int i = 0; i < 16; i++)
+                green += pixels[4*i] == 0 && pixels[4*i+1] == 255 && pixels[4*i+2] == 0;
+            CGContextRelease(ctx);
+        }
+        CGColorSpaceRelease(color);
+        CGImageRelease(image);
+    }
+    if (source) CFRelease(source);
+    EXPECT(path, 16, green);
+}
+
+static void check_external_screenshots(void) {
+    char dir[] = "/tmp/nxnative-external-shot.XXXXXX";
+    if (!mkdtemp(dir)) { EXPECT("screenshot test directory", 1, 0); return; }
+    char scheduled[sizeof dir + 16], queued[sizeof dir + 16], spec[sizeof scheduled + 3];
+    snprintf(scheduled, sizeof scheduled, "%s/scheduled.png", dir);
+    snprintf(queued, sizeof queued, "%s/queued.png", dir);
+    snprintf(spec, sizeof spec, "1:%s", scheduled);
+    setenv("DM_NVN_SHOT", spec, 1);
+    unsetenv("DM_NVN_SHOT_OUT");
+
+    MTLTextureDescriptor *td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm width:4 height:4 mipmapped:NO];
+    td.usage = MTLTextureUsageRenderTarget;
+    td.storageMode = MTLStorageModeShared;
+    id<MTLTexture> tex = [g_dev newTextureWithDescriptor:td];
+    const uint8_t black[4 * 4 * 4] = {0};
+    [tex replaceRegion:MTLRegionMake2D(0, 0, 4, 4) mipmapLevel:0 withBytes:black bytesPerRow:16];
+
+    id<MTLSharedEvent> ready = [g_dev newSharedEvent];
+    assert(ready);
+    id<MTLCommandQueue> producer = [g_dev newCommandQueue];
+    id<MTLCommandBuffer> cb = [producer commandBuffer];
+    MTLRenderPassDescriptor *pass = [MTLRenderPassDescriptor renderPassDescriptor];
+    pass.colorAttachments[0].texture = tex;
+    pass.colorAttachments[0].loadAction = MTLLoadActionClear;
+    pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+    pass.colorAttachments[0].clearColor = MTLClearColorMake(0, 1, 0, 1);
+    [[cb renderCommandEncoderWithDescriptor:pass] endEncoding];
+    [cb encodeSignalEvent:ready value:1];
+    // Leave the producer unsubmitted while the external present first reaches readback.
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 250 * NSEC_PER_MSEC), dispatch_get_global_queue(0, 0), ^{ [cb commit]; });
+    uint64_t serial = mtl_ext_tex((__bridge void *)tex);
+    dm_gfx_shot_at(1, queued);
+    uint64_t ticket = mtl_present_ext(serial, 1.0 / 60, (__bridge void *)ready, 1, NULL);
+    EXPECT("external present returns a ticket", 1, ticket != 0);
+    if (ticket) mtl_present_wait(ticket);
+    check_external_png(scheduled);
+    check_external_png(queued);
+    EXPECT("producer completes", 1, [ready waitUntilSignaledValue:1 timeoutMS:5000]);
+    mtl_ext_tex_release(serial);
+    unlink(scheduled);
+    unlink(queued);
+    rmdir(dir);
+}
+#endif
+
+int main(int argc, char **argv) { @autoreleasepool {
+    mtl_init();
+#ifdef DM_GAME_WIDE_CANVAS_FORMAT
+    {
+        tex_t firstTexture = {.magic = MAGIC('T','E','X',0), .serial = 101}, secondTexture = {.serial = 202};
+        win_builder_t firstBuilder = {.ntex = 2, .tex = {(NVNtexture *)&firstTexture, (NVNtexture *)&secondTexture}};
+        win_builder_t secondBuilder = {.ntex = 1, .tex = {(NVNtexture *)&firstTexture}};
+        win_t firstWindow = {0}, secondWindow = {0};
+        EXPECT("first widescreen window initializes", 1, h_nvnWindowInitialize((NVNwindow *)&firstWindow, (NVNwindowBuilder *)&firstBuilder));
+        EXPECT("second widescreen window initializes", 1, h_nvnWindowInitialize((NVNwindow *)&secondWindow, (NVNwindowBuilder *)&secondBuilder));
+        EXPECT("first window texture is registered", 1, NvnWideWindowContains(101));
+        EXPECT("second window texture is registered", 1, NvnWideWindowContains(202));
+        EXPECT("zero is not a window texture", 0, NvnWideWindowContains(0));
+        uint8_t commandMemory[4096] __attribute__((aligned(8))) = {0};
+        cmd_t command = {.cur = commandMemory, .end = commandMemory + sizeof commandMemory};
+        const NVNtexture *targets[] = {(NVNtexture *)&firstTexture};
+        h_nvnCommandBufferSetRenderTargets((NVNcommandBuffer *)&command, 1, targets, NULL, NULL, NULL);
+        p_set_rt *recordedTargets = (p_set_rt *)(commandMemory + sizeof(op_hdr));
+        EXPECT("window identity recorded in target snapshot", 1, recordedTargets->color[0]->wide_window);
+        EXPECT("guest texture remains unchanged", 0, firstTexture.wide_window);
+        h_nvnWindowFinalize((NVNwindow *)&firstWindow);
+        EXPECT("shared texture remains registered", 1, NvnWideWindowContains(101));
+        EXPECT("unshared texture is removed", 0, NvnWideWindowContains(202));
+        NvnWideTextureChanged((NVNtexture *)&firstTexture, 303);
+        EXPECT("old texture serial is removed", 0, NvnWideWindowContains(101));
+        EXPECT("new texture serial is registered", 1, NvnWideWindowContains(303));
+        NvnWideTextureChanged((NVNtexture *)&firstTexture, 0);
+        EXPECT("finalized texture serial is removed", 0, NvnWideWindowContains(303));
+        h_nvnWindowFinalize((NVNwindow *)&secondWindow);
+        EXPECT("all windows removed", 0, NvnWideWindowContains(101));
+        EXPECT("queued target snapshot keeps window identity", 1, recordedTargets->color[0]->wide_window);
+
+        enum { WINDOW_COUNT = 160 };
+        win_t windows[WINDOW_COUNT] = {0};
+        tex_t textures[WINDOW_COUNT] = {0};
+        for (int i = 0; i < WINDOW_COUNT; i++) {
+            textures[i].serial = (uint64_t)i + 1000;
+            windows[i].ntex = 1; windows[i].tex[0] = (NVNtexture *)&textures[i];
+            NvnWideWindowSet(&windows[i]);
+        }
+        EXPECT("window registry grows past 128 entries", 1, NvnWideWindowContains(1159));
+        for (int i = 0; i < WINDOW_COUNT; i++) NvnWideWindowRemove(&windows[i]);
+        EXPECT("grown registry removes every window", 0, NvnWideWindowContains(1159));
+        __block _Atomic int concurrentFailures = 0;
+        win_t *windowEntries = windows;
+        tex_t *textureEntries = textures;
+        dispatch_apply(WINDOW_COUNT, dispatch_get_global_queue(0, 0), ^(size_t index) {
+            for (int i = 0; i < 20; i++) {
+                NvnWideWindowSet(&windowEntries[index]);
+                if (!NvnWideWindowContains(textureEntries[index].serial)) atomic_fetch_add(&concurrentFailures, 1);
+                NvnWideWindowRemove(&windowEntries[index]);
+            }
+        });
+        EXPECT("concurrent window registry operations", 0, atomic_load(&concurrentFailures));
+    }
+#endif
+#ifndef CROP_LEGACY_HEADER
+    if (argc == 2 && !strcmp(argv[1], "--external-screenshots")) {
+        check_external_screenshots();
+        return failed != 0;
+    }
     mtl_present_layer(1,1);   // square fixtures: a sized square layer, so the checks below see the crop's texels and the bars of that shape; the display's own shape is checked at the end
 #endif
     MTLTextureDescriptor *d=[MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm width:8 height:8 mipmapped:NO];d.storageMode=MTLStorageModeShared;d.usage=MTLTextureUsageShaderRead;
