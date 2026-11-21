@@ -214,6 +214,18 @@ def frame_step(ctx):
         fs_put(site, [B(site, start)], why)
     cam_fovy(0x10ee094, '007440bd', 0, 'main camera fovy getter: widened like the projection (culling tests)')
     cam_fovy(0x10ee0cc, '007440bd', 0x16a0000, 'main camera fovy getter in degrees: widened like the projection')
+    fs_site(0xeb4a44, '009840bd')
+    start = here(); emit(ADRP(8, here(), FS_STATE_OFF))
+    for word in (0x91081108, 0x88dffd0b, 0x5291c72a, 0x72a7fc6a, 0x6b0a017f, 0x540003c9,
+                 0xb940a009, 0x5281524a, 0x72a7e0ca, 0x6b0a013f, 0x54000321,
+                 0xb940b009, 0x5291c72a, 0x72a7fc6a, 0x6b0a013f, 0x54000283,
+                 0xb940b409, 0x528147aa, 0x72b7d2ea, 0x6b0a013f, 0x540001e1,
+                 0xb940b809, 0x529ae14a, 0x72b7746a, 0x6b0a013f, 0x54000141,
+                 0xb900b00b, 0x1e270170, 0x5291c72a, 0x72a7fc6a, 0x1e270151,
+                 0x1e301a31, 0xbd40b410, 0x1e310a10, 0xbd00b410, 0xbd409800):
+        emit(word)
+    emit(B(here(), 0xeb4a48))
+    fs_put(0xeb4a44, [B(0xeb4a44, start)], 'inventory preview projection: use the widescreen aspect and preserve its centre offset')
     # The HUD's projection still came out 16:9 (its aspect is stored by other code too), so sead::PerspectiveProjection::doUpdateMatrix (main+0xeb4a44) builds the matrix of
     # a 16:9 projection with near 1 and far 10000, the HUD camera's, with the screen's ratio and tan(half angle) x k: the same widened vertical angle, nothing else changed.
     # State +0x74 float 16/9, +0x78 float its tolerance, +0x7c float 10000.0
@@ -470,19 +482,98 @@ def frame_step(ctx):
         emit(w)
     emit(B(here(), 0xed81f4))
     fs_put(0xf75ba4, [B(0xf75ba4, start) | 0x80000000], 'screen copy into a 16:9 picture (camera photo): the screen\'s middle 16:9 band, not the whole taller screen squashed into it')
+    CameraAspect(ctx)
+    CaptureRectAspect(ctx)
+
+
+# Match captured screen rectangles to the horizontally compensated layout.
+def CaptureRectAspect(ctx):
+    # These two calls copy the scene behind a layout pane. Their x3 scale at
+    # [sp + offset] is the captured width / screen width. The widened layout
+    # is drawn at 16:9 / aspect, so its capture must sample that same fraction
+    # about the screen centre; otherwise the backing shows a shifted image.
+    for site, original, scale_offset in ((0xf5a5b0, '11f7fd97', 0xa0), (0xf66428, '73c7fd97', 0x50)):
+        ctx.site(site, original)
+        start = ctx.here()
+        ctx.emit(0xd10083ff); ctx.emit(0xad0007e0)   # sub sp,sp,#32; stp q0,q1,[sp]
+        ctx.emit(ADRP(16, ctx.here(), ctx.state))
+        for word in (0xbd420600, 0x1e202008, 0x540001a0,   # ldr s0,[x16,#0x204]; fcmp s0,#0; b.eq restore
+                     0xbd4003e0 | (scale_offset // 4 << 10), 0x1e2e1002, 0x1e222000, 0x5400012a,  # full-width capture: restore
+                     0xbd420600, 0x1e201001, 0x1e2e5002, 0x1e221821, 0x1e201821,  # s1 = (2 / 1.125) / aspect
+                     0xbd4003e0 | (scale_offset // 4 << 10), 0x1e210800,
+                     0xbd0003e0 | (scale_offset // 4 << 10),  # scale x *= s1
+                     0xad4007e0, 0x910083ff):   # ldp q0,q1,[sp]; add sp,sp,#32
+            ctx.emit(word)
+        ctx.emit(B(ctx.here(), 0xed81f4) | 0x80000000)
+        ctx.emit(B(ctx.here(), site + 4))
+        ctx.put(site, [B(site, start)], 'screen capture source width follows the widescreen UI compensation')
+
+
+# Replace the main camera's aspect after its original calculation and acknowledge the applied value.
+def CameraAspect(ctx):
+    # Adapted from MacNativeGames games/totk/runtime/game_patches_botw.c:
+    # https://github.com/ly05010419/MacNativeGames (MIT).
+    # Copyright (c) 2026 MacNativeGames contributors
+    #
+    # Permission is hereby granted, free of charge, to any person obtaining a copy
+    # of this software and associated documentation files (the "Software"), to deal
+    # in the Software without restriction, including without limitation the rights
+    # to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+    # copies of the Software, and to permit persons to whom the Software is
+    # furnished to do so, subject to the following conditions:
+    #
+    # The above copyright notice and this permission notice shall be included in all
+    # copies or substantial portions of the Software.
+    #
+    # THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+    # IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+    # FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+    # AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+    # LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+    # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+    # SOFTWARE.
+    # State +0x200/+0x204 is separate from dynamic resolution and the taller-screen
+    # FOV history at +0x100..+0x1ff. Zero preserves the game's original aspect.
+    original = (0xbd406e80, 0x39006276, 0xbd00aa60, 0xbd407280, 0x39006276,
+                0xbd00ae60, 0x2d4806a0, 0x2d470ea2, 0x39006276, 0x1e233821,
+                0x1e223800, 0x1e211800, 0xbd00c260)
+    site = 0x10edae0
+    ctx.site(site, struct.pack('<13I', *original).hex())
+    start = ctx.here()
+    for word in original[:-1]:
+        ctx.emit(word)
+    ctx.emit(ADRP(8, ctx.here(), ctx.state))
+    for word in (0x91080108,   # add x8,x8,#0x200: desired aspect
+                 0x88dffd09,   # ldar w9,[x8]
+                 0x34000049,   # cbz w9,store
+                 0x1e270120,   # fmov s0,w9
+                 original[-1], # str s0,[x19,#0xc0]
+                 0x91001108,   # add x8,x8,#4: acknowledgement
+                 0x889ffd09):  # stlr w9,[x8]
+        ctx.emit(word)
+    ctx.emit(B(ctx.here(), site + 4 * len(original)))
+    ctx.put(site, [B(site, start)] + [0xd503201f] * (len(original) - 1),
+            'main camera aspect: apply and acknowledge the host ratio (state +0x200/+0x204)')
 
 
 FRAME_STEP = {'cd57b23fa4bbad65803d9788c01821ee': frame_step}
+CAPABILITIES = {'cd57b23fa4bbad65803d9788c01821ee': ('CAMERA_ASPECT',)}
 
 # How general each patch is and could be (dm/tools/docs_patches.py "Binding", listed in docs/agents/game-patches.md): what, its binding now, the loosest it could have (goal),
 # purpose, why; blocked or kept: why the gap stays open (cannot close yet, or left open on purpose); checked: what was checked on game files (else a judgement)
 BINDING = [
+    {'what': 'BOTW camera-aspect acknowledgement', 'now': 'build', 'goal': 'game', 'purpose': 'rendering',
+     'why': "the camera writer is verified for this game's 1.9.0 main", 'blocked': 'the camera stub has no function-matched form yet'},
+    {'what': 'screen capture rectangle follows widescreen UI compensation', 'now': 'build', 'goal': 'game', 'purpose': 'rendering',
+     'why': "the capture calls and their stack arguments belong to this game's layout code", 'blocked': 'the capture stubs have no function-matched form yet'},
+    {'what': 'inventory preview widescreen projection', 'now': 'build', 'goal': 'game', 'purpose': 'rendering',
+     'why': 'the preview projection signature was checked on the 1.9.0 build', 'blocked': 'the projection signature and site have not been checked on another build'},
     {'what': 'interval controller: the lower bound and the GPU-time path', 'now': 'build', 'goal': 'game', 'purpose': 'frame rate',
      'why': "sead::GameFrameworkNx's interval controller in this build; Tears of the Kingdom shares sead but not this code"},
     {'what': '60 fps frame step and render scale (ksys::VFR)', 'now': 'build', 'goal': 'game', 'purpose': 'frame rate',
      'why': "the game's own frame code; the frame-step state page is general. No engine sibling shares it: none of its 34 functions has an exact match in Tears of the "
             'Kingdom, SMO, MK8D, ACNH, Splatoon 2 / 3, Kirby, Mario Party, Ocarina, Smash, Metroid Dread or Origami King (only the widescreen stubs\' sead::PerspectiveProjection '
             'functions recur)',
-     'checked': 'nso_fnmap of its 44 sites into those 13 mains (2026-11-09)',
-     'kept': '44 sites in 34 functions to fingerprint for an update that may not come (1.9.0, the Switch 2 Edition release); convert when a new build appears'},
+    'checked': 'nso_fnmap of its original 44 sites into those 13 mains (2026-11-09)',
+    'kept': '45 sites in 34 functions to fingerprint for an update that may not come (1.9.0, the Switch 2 Edition release); convert when a new build appears'},
 ]

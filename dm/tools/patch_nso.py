@@ -1714,7 +1714,8 @@ if (BUILD_ID in FRAME_STEP or FS_MATCH) and NAME == 'main':
         # The loader supplies zero-filled BSS/key pages for a front patch area.
         # Reserve the frame state after the key page there too; stubs reach it by ADRP.
         IMAGE_SIZE = FS_STATE_OFF + 0x4000
-    assert FS_STATE_OFF % 0x1000 == 0 and (FAR or FS_STATE_OFF + 0x40 <= PATCH_OFF) and not any(IMG[FS_STATE_OFF:]), 'frame step state page'
+    _frameStateBytes = 0x208 if 'CAMERA_ASPECT' in PATCHES['CAPABILITIES'].get(BUILD_ID, ()) else 0x40
+    assert FS_STATE_OFF % 0x1000 == 0 and (FAR or FS_STATE_OFF + _frameStateBytes <= PATCH_OFF) and not any(IMG[FS_STATE_OFF:]), 'frame step state page'
 # What frame step and stub code (STUBS below) may write: a site whose original bytes match and that holds no rewrite site, the cuts list (<name>.cuts.tsv) that names it, and
 # data addresses read from the original text
 def stub_site(off, orig, what):
@@ -1741,6 +1742,7 @@ if FS_STATE_OFF:   # the build's stubs (FRAME_STEP of its patches.py), or those 
                                             state=FS_STATE_OFF, render_scale=0, step_max=0, base=FS_MATCH[1] if FS_MATCH else 0, others=FS_MATCH[2] if FS_MATCH else {},
                                             found=FS_MATCH[3] if FS_MATCH else None, capabilities=set(), address=lambda off: stub_address(off, 'frame step'))
     (FS_MATCH[0]['stub'] if FS_MATCH else FRAME_STEP[BUILD_ID])(fs); RENDER_SCALE = fs.render_scale; STEP_MAX = fs.step_max; FS_CAPABILITIES = fs.capabilities
+    if 'CAMERA_ASPECT' in FS_CAPABILITIES: assert FAR or FS_STATE_OFF + 0x208 <= PATCH_OFF, 'camera aspect state page'
 
 # ---- Stubs (the modules whose patch file has STUBS of their build) ----
 # A fix of the game's own code that needs more instructions than its sites hold: STUBS[build ID](ctx) in its patches.py assembles them into the patch area and branches there from

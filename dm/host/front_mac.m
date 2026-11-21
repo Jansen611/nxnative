@@ -646,7 +646,7 @@ void front_picture_shape(int w, int h) { if (w > 0 && h > 0) g_picture_aspect = 
     CAMetalLayer *l = (CAMetalLayer *)self.layer; if (![l isKindOfClass:CAMetalLayer.class] || !self.window) return;
     l.contentsScale = self.window.backingScaleFactor;
     NSSize px = [self convertSizeToBacking:self.bounds.size]; if (px.width < 1 || px.height < 1 || CGSizeEqualToSize(l.drawableSize, px)) return;
-    l.drawableSize = px; LOG("front end: drawable %.0fx%.0f", px.width, px.height);
+    l.drawableSize = px; dm_game_aspect_drawable(px.width, px.height); LOG("front end: drawable %.0fx%.0f", px.width, px.height);
 }
 - (void)setFrameSize:(NSSize)s { [super setFrameSize:s]; [self fitDrawable]; }
 - (void)viewDidChangeBackingProperties { [super viewDidChangeBackingProperties]; [self fitDrawable]; }
@@ -1522,6 +1522,14 @@ void front_run(void (*guest)(void)) {
         [NSApplication sharedApplication];
         [NSApp setActivationPolicy:NSApplicationActivationPolicyRegular];
         NSRect r = NSMakeRect(0, 0, 1280, 720);
+        const char *windowSize = getenv("DM_WINDOW_SIZE");
+        if (windowSize && *windowSize) {
+            unsigned width, height; char extra;
+            if (sscanf(windowSize, "%ux%u%c", &width, &height, &extra) == 2 && width >= 320 && width <= 8192 && height >= 180 && height <= 8192) {
+                r.size = NSMakeSize(width, height);
+                LOG("front end: window content %ux%u points (DM_WINDOW_SIZE)", width, height);
+            } else LOG("[RED] DM_WINDOW_SIZE=%s: expected widthxheight in points (320..8192 by 180..8192); keeping 1280x720", windowSize);
+        }
         NSWindow *win = [[NSWindow alloc] initWithContentRect:r
                                                     styleMask:NSWindowStyleMaskTitled | NSWindowStyleMaskClosable | NSWindowStyleMaskResizable
                                                       backing:NSBackingStoreBuffered defer:NO];

@@ -5463,6 +5463,35 @@ static int pf_is_float(MTLPixelFormat f) {   // Float color formats that can sto
     switch (f) { case MTLPixelFormatR16Float: case MTLPixelFormatRG16Float: case MTLPixelFormatRGBA16Float: case MTLPixelFormatR32Float:
         case MTLPixelFormatRG32Float: case MTLPixelFormatRGBA32Float: case MTLPixelFormatRG11B10Float: return 1; default: return 0; }
 }
+// Remember the profile's final depth-free canvas before it is copied to the swapchain.
+// Adapted from MacNativeGames (MIT); the full licence is in the BOTW profile's patches.py.
+static uint64_t g_aspect_canvas;
+static NSUInteger g_aspect_canvas_w, g_aspect_canvas_h;
+#ifdef DM_GAME_WIDE_CANVAS_FORMAT
+static uint64_t g_aspect_last_canvas;
+static NSUInteger g_aspect_last_w, g_aspect_last_h;
+#endif
+static void LearnAspectCanvas(MTL4RenderPassDescriptor *descriptor) {
+#ifdef DM_GAME_WIDE_CANVAS_FORMAT
+    const char *canvasFormat = DM_GAME_WIDE_CANVAS_FORMAT;
+    if (!canvasFormat || strcmp(canvasFormat, "rgb10a2")) return;
+    if (!(dm_game_aspect() > 0) || R.rt.n < 1 || !R.rt.color[0]) return;
+    const tex_t *target = R.rt.color[0];
+    id<MTLTexture> texture = descriptor.colorAttachments[0].texture;
+    if (xv_present(target->serial)) {
+        if (g_aspect_last_canvas) {
+            g_aspect_canvas = g_aspect_last_canvas;
+            g_aspect_canvas_w = g_aspect_last_w; g_aspect_canvas_h = g_aspect_last_h;
+        }
+    } else if (texture && texture.pixelFormat == MTLPixelFormatRGB10A2Unorm && texture.width >= DM_GAME_WIDE_CANVAS_MIN_WIDTH && texture.height &&
+               fabs((double)texture.width / texture.height * 9 / 16 - 1) < 0.01 && !descriptor.colorAttachments[0].level && !descriptor.depthAttachment.texture) {
+        g_aspect_last_canvas = target->serial; g_aspect_last_w = texture.width; g_aspect_last_h = texture.height;
+        if (texture.width == g_aspect_canvas_w && texture.height == g_aspect_canvas_h) g_aspect_canvas = target->serial;
+    }
+#else
+    (void)descriptor;
+#endif
+}
 static int fz_load_covers(int i, id<MTLTexture> t, NSUInteger level);
 static NSMutableArray *g_lp;    // DM_NVN_LOADPROBE=1 / 2 / 3 (two constant sentinel values / NaN - under float formats normal shader output cannot reach NaN, ruling out numeric coincidence): attachments judged elidable are cleared to the sentinel color instead, and at pass end the remaining sentinel pixels are read back and counted (diagnostic: should be 0)
 static void lp_finish(void);
@@ -5959,6 +5988,7 @@ static id<MTL4RenderCommandEncoder> rp_begin_ex_(int clear_only) {
         }
         return nil;
     }
+    LearnAspectCanvas(pd);
     g_rp_aw = g_rp_ah = 0;
     if (rpa_on() && !g_rp_whole && !clear_only && R.has_sc && !g_rp_layered && !tbdr_on() && !R.clear_d && !R.clear_s) {
         int cl = 0; for (int i = 0; i < 8; i++) cl |= R.clear_c[i];
@@ -15138,6 +15168,30 @@ static int skip_fs_draw(NvProg *pr) {
     return 0;
 }
 static void draw(const p_draw *dw, const p_draw_idx *di) { cp_stamp start = cp_begin(); if (dw && dw->prim == DM_PRIM_MESH_TASKS) mesh_tasks_draw(dw); else draw_(dw, di); cp_end(5, start); }
+static int IsWideGradient(NvProg *program, const tex_t *texture) {
+#ifdef DM_GAME_WIDE_GRADIENT_VS
+    const char *vertexKey = DM_GAME_WIDE_GRADIENT_VS, *fragmentKey = DM_GAME_WIDE_GRADIENT_FS;
+    if (!vertexKey || !fragmentKey || texture->d.width != DM_GAME_WIDE_GRADIENT_WIDTH || texture->d.height != DM_GAME_WIDE_GRADIENT_HEIGHT ||
+        !program->sh[0] || !program->sh[1] || strncmp(program->sh[0]->key, vertexKey, 16) || strncmp(program->sh[1]->key, fragmentKey, 16)) return 0;
+    const p_bind_buf *vertex = &S.ubo[0][0], *fragment = &S.ubo[1][0];
+    if (!vertex->addr || vertex->size < DM_GAME_WIDE_GRADIENT_OFFSET + 2 * sizeof(float) || !fragment->addr || fragment->size < 16 ||
+        pend_hits(vertex->addr, vertex->size) || pend_hits(fragment->addr, fragment->size) ||
+        (g_nubd && (ubd_hits(vertex->addr, vertex->addr + vertex->size) || ubd_hits(fragment->addr, fragment->addr + fragment->size)))) return 0;
+    void *vertexBuffer, *fragmentBuffer; uint64_t vertexOffset, fragmentOffset, gpu;
+    if (!mtl_gpu_addr(vertex->addr, vertex->size, &vertexBuffer, &vertexOffset, &gpu) ||
+        !mtl_gpu_addr(fragment->addr, fragment->size, &fragmentBuffer, &fragmentOffset, &gpu)) return 0;
+    const void *vertexContents = [(__bridge id<MTLBuffer>)vertexBuffer contents];
+    const void *fragmentContents = [(__bridge id<MTLBuffer>)fragmentBuffer contents];
+    if (!vertexContents || !fragmentContents) return 0;
+    float bounds[2], colour[3];
+    memcpy(bounds, (const char *)vertexContents + vertexOffset + DM_GAME_WIDE_GRADIENT_OFFSET, sizeof bounds);
+    memcpy(colour, (const char *)fragmentContents + fragmentOffset, sizeof colour);
+    return bounds[0] == DM_GAME_WIDE_GRADIENT_CANVAS && bounds[1] == DM_GAME_WIDE_GRADIENT_CANVAS && colour[0] == 0 && colour[1] == 0 && colour[2] == 0;
+#else
+    (void)program; (void)texture;
+    return 0;
+#endif
+}
 static void draw_(const p_draw *dw, const p_draw_idx *di) {
     g_draw_binst = (uint32_t)(dw ? dw->base_instance : di ? di->base_instance : 0);   // c0 + 0x644 of the stages that read the driver segment (encode_args)
     if (passdump()) { NvProg *p = g_geo_program ? g_geo_program : S.prog ? prog_get(S.prog) : nil;
@@ -15234,7 +15288,8 @@ static void draw_(const p_draw *dw, const p_draw_idx *di) {
     if (g_enc && g_vis_counting && g_vis_n >= VIS_SLOTS) rp_end();   // this draw's query needs a slot and the buffer is bound for the whole pass: the next pass begins with a new one (rp_begin_ex)
     if (g_enc && g_rp_aw && (!R.has_sc || (long)R.sc.x + R.sc.w > (long)g_rp_aw || (long)R.sc.y + R.sc.h > (long)g_rp_ah)) rp_end();   // leaves the pass's render area
     fb_prepare(pr);   // same-pass feedback sampling: copy the snapshot first (see fb_prepare)
-    if (R.has_sc && !g_enc && !S.rast_discard) {
+    if (R.has_sc && !g_enc && !S.rast_discard &&
+        !(dm_game_aspect() > 0 && R.rt.n > 0 && R.rt.color[0] && R.rt.color[0]->serial == g_aspect_canvas)) {
         NSUInteger tw0 = 0, th0 = 0; rt_dims(&tw0, &th0);
         long x0 = R.sc.x < 0 ? 0 : R.sc.x, y0 = R.sc.y < 0 ? 0 : R.sc.y, x1 = (long)R.sc.x + R.sc.w, y1 = (long)R.sc.y + R.sc.h;
         if (x1 > (long)tw0) x1 = tw0; if (y1 > (long)th0) y1 = th0;
@@ -15258,6 +15313,19 @@ static void draw_(const p_draw *dw, const p_draw_idx *di) {
     if (g_enc && g_sm_pass && draw_samples_rt(pr)) { PD("M %llu a draw in the slice-merged pass samples its attachment; split here", g_stat_pass); rp_end(); }
     if (g_enc && g_sm_pass && g_wl.on) { PD("M %llu a wide line in the slice-merged pass: split here", g_stat_pass); rp_end(); }   // its pipeline is not amplified (wl_pso)
     if (!g_enc && mode == 0 && !g_rp_layered && !defer_q_draw && g_exec_next && !tbdr_on() && !g_geo_program && !g_wl.on && sm_on()) sm_plan(pr);
+    if (!g_enc && dm_game_aspect() > 16.0 / 9.0 && R.rt.n > 0 && R.rt.color[0] &&
+        (R.rt.color[0]->serial == g_aspect_canvas ||
+         (g_aspect_canvas_w && R.rt.color[0]->d.width == g_aspect_canvas_w && R.rt.color[0]->d.height == g_aspect_canvas_h)) &&
+        (dw ? dw->count : di ? di->count : 0) == 6) {
+        int textureId = (int)(S.tex[1][0] & 0xfffff);
+        os_unfair_lock_lock(&g_rmu);
+        if (textureId > 0 && textureId < g_ntreg && g_treg[textureId].ok) {
+            const tex_t *texture = &g_treg[textureId].t;
+            if (texture->d.width >= 320 && texture->d.height && fabs((double)texture->d.width / texture->d.height * 9 / 16 - 1) < 0.02)
+                tex_by_id(textureId);
+        }
+        os_unfair_lock_unlock(&g_rmu);
+    }
     vbuf_prepare(pr->sh[0] ? &pr->sh[0]->rf : NULL, dw, di);   // an unaligned GPU-written stream, or one the draw reads past, needs its ordered copy before the render encoder
     id<MTLRenderCommandEncoder> en = rp_begin_ex(mode);
     g_rp_layered = 0; g_sm_plan.on = 0;
@@ -15315,7 +15383,30 @@ static void draw_(const p_draw *dw, const p_draw_idx *di) {
       if (!(g_ed.ok & ED_SREF) || g_ed.sref != sr || g_ed.sref_b != sb) { enc_r_stencil_ref(en, sr, sb); g_ed.sref = sr; g_ed.sref_b = sb; g_ed.ok |= ED_SREF; } }
     // Viewport / scissor (clamped within the target size)
     NSUInteger tw = g_pass.tw, th = g_pass.th;
+    double aspectScale = 1, effectiveAspect = dm_game_aspect();
+    if (effectiveAspect > 16.0 / 9.0 && R.rt.n > 0 && R.rt.color[0] && R.rt.color[0]->serial == g_aspect_canvas &&
+        (dw ? dw->count : di ? di->count : 0) == 6) {
+        int scenePicture = 0, textureId = (int)(S.tex[1][0] & 0xfffff);
+        os_unfair_lock_lock(&g_rmu);
+        if (textureId > 0 && textureId < g_ntreg && g_treg[textureId].ok) {
+            const tex_t *texture = &g_treg[textureId].t;
+            scenePicture = texture->d.width >= 320 && texture->d.height &&
+                fabs((double)texture->d.width / texture->d.height * 9 / 16 - 1) < 0.02 && mtl_tex_gpu_owned(texture->serial);
+            if (!scenePicture && texture->d.width >= 320 && texture->d.height &&
+                fabs((double)texture->d.width / texture->d.height * 9 / 16 - 1) < 0.02 &&
+                texture->pool && !g_treg[textureId].gone && !texture->has_layout && !tex_cpu_written(texture->serial) && !nvn_sparse_pool(texture->pool)) {
+                alias_key key = tex_alias_key(texture);
+                id shared = own_alias_peek(&key);
+                if ([shared conformsToProtocol:@protocol(MTLTexture)])
+                    scenePicture = (((id<MTLTexture>)shared).usage & (MTLTextureUsageRenderTarget | MTLTextureUsageShaderWrite)) != 0;
+            }
+            if (!scenePicture) scenePicture = IsWideGradient(pr, texture);
+        }
+        os_unfair_lock_unlock(&g_rmu);
+        if (!scenePicture) aspectScale = (16.0 / 9.0) / effectiveAspect;
+    }
     { MTLViewport v = S.has_vp ? (MTLViewport){S.vp[0][0], S.vp[0][1], S.vp[0][2], S.vp[0][3], S.dr[0], S.dr[1]} : (MTLViewport){0, 0, tw, th, 0, 1};
+      if (aspectScale != 1) { v.originX = tw / 2.0 + (v.originX - tw / 2.0) * aspectScale; v.width *= aspectScale; }
       if (atomic_load_explicit(&g_origin_ll, memory_order_relaxed)) { v.originY += v.height; v.height = -v.height; }   // lower-left origin (see g_origin_ll)
       // Viewport swizzle: NEGATIVE_Y negates clip y, the same as the viewport flipped about its centre; facing is decided after it on the GPU as in Metal, so the winding stays.
       // Other swizzles (axis exchanges, negated x / z / w) are no viewport change and are drawn unswizzled
@@ -15325,7 +15416,9 @@ static void draw_(const p_draw *dw, const p_draw_idx *di) {
       if (!(g_ed.ok & ED_VP) || memcmp(&g_ed.vp, &v, sizeof v)) { enc_r_viewport(en, v); g_ed.vp = v; g_ed.ok |= ED_VP; } }
     MTLScissorRect sc = {0, 0, tw, th};
     if (R.has_sc && !S.rast_discard) {   // raster state cannot suppress vertex storage writes
-        long x0 = R.sc.x < 0 ? 0 : R.sc.x, y0 = R.sc.y <= 0 ? 0 : R.sc.y, x1 = (long)R.sc.x + R.sc.w, y1 = (long)R.sc.y + R.sc.h;
+        long sx0 = R.sc.x, sx1 = (long)R.sc.x + R.sc.w;
+        if (aspectScale != 1) { sx0 = lround(tw / 2.0 + (sx0 - tw / 2.0) * aspectScale); sx1 = lround(tw / 2.0 + (sx1 - tw / 2.0) * aspectScale); }
+        long x0 = MAX(sx0, 0), y0 = R.sc.y <= 0 ? 0 : R.sc.y, x1 = sx1, y1 = (long)R.sc.y + R.sc.h;
         if (x1 > (long)tw) x1 = tw; if (y1 > (long)th) y1 = th;
         if (x1 <= x0 || y1 <= y0) { PD("Z %llu draw skipped: empty scissor (%d,%d %dx%d, target %lux%lu)", g_stat_pass, R.sc.x, R.sc.y, R.sc.w, R.sc.h, (unsigned long)tw, (unsigned long)th); return; }
         sc = (MTLScissorRect){(NSUInteger)x0, (NSUInteger)y0, (NSUInteger)(x1 - x0), (NSUInteger)(y1 - y0)};
@@ -17333,6 +17426,8 @@ static _Atomic uint64_t g_layer_shape, g_screen_shape;   // w | h << 32, 0 = non
 void mtl_present_layer(uint32_t w, uint32_t h) { atomic_store(&g_layer_shape, (uint64_t)w | (uint64_t)h << 32); }
 void mtl_present_screen(uint32_t w, uint32_t h) { atomic_store(&g_screen_shape, (uint64_t)w | (uint64_t)h << 32); }
 static void present_shape(id<MTLTexture> src, double *w, double *h) {
+    float cameraAspect = dm_game_aspect();
+    if (cameraAspect > 0) { *w = cameraAspect * 1080; *h = 1080; return; }
     uint64_t v = atomic_load(&g_screen_shape);
     if (v && fabs(((double)src.width / src.height) / ((double)(uint32_t)v / (double)(v >> 32)) - 1) < 0.01) { *w = src.width; *h = src.height; return; }
     v = atomic_load(&g_layer_shape);
@@ -18006,6 +18101,7 @@ static int link_on(void) { return g_dm_present_link && !atomic_load(&g_rescue_mo
 __attribute__((weak)) int front_screen_max_fps(void) { return 0; }   // front_mac.m; graphics unit tests and iOS have none
 __attribute__((weak)) void front_screen_match(int fps) { (void)fps; }   // front_mac.m; graphics unit tests and iOS have none
 __attribute__((weak)) void front_picture_shape(int w, int h) { (void)w; (void)h; }   // front_mac.m, front_ios.m; graphics unit tests have none
+__attribute__((weak)) float dm_game_aspect(void) { return 0; }   // graphics tests do not link the loader
 static CAFrameRateRange link_range(int mode) {
     static int on = -1; if (on < 0) { const char *e = getenv("DM_LINK_VTICK"); on = !(e && !strcmp(e, "0")); }
     int rate = mode == 3 ? 30 : mode == 2 ? 120 : 60, hz = on ? front_screen_max_fps() : 0;

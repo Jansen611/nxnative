@@ -216,6 +216,22 @@ def header_one(g):
     if pm not in ('follow', 'boost'): sys.exit(f'{g.id}: perf_mode must be follow or boost: {pm}')
     dmo = g.get('depth_mode', 'gl')   # the NVN depth mode the game sets, for the pipeline archive made offline (dm/gfx/tools/pso_offline.py; the host follows the game at run time): gl / zero
     if dmo not in ('gl', 'zero'): sys.exit(f'{g.id}: depth_mode must be gl or zero: {dmo}')
+    canvas = g.words('wide_canvas', '')
+    if canvas:
+        try:
+            valid_canvas = len(canvas) == 2 and canvas[0] == 'rgb10a2' and 0 < int(canvas[1], 0) <= 8192
+        except ValueError:
+            valid_canvas = False
+        if not valid_canvas: sys.exit(f'{g.id}: wide_canvas requires rgb10a2 and a minimum width')
+    gradient = g.words('wide_gradient', '')
+    if gradient:
+        try:
+            valid_gradient = (len(gradient) == 6 and all(re.fullmatch(r'[0-9a-f]{16}', key) for key in gradient[:2])
+                              and all(0 < int(value, 0) <= 8192 for value in gradient[2:4] + gradient[5:6])
+                              and 0 <= int(gradient[4], 0) <= 0xffff)
+        except ValueError:
+            valid_gradient = False
+        if not valid_gradient: sys.exit(f'{g.id}: wide_gradient requires vertex key, fragment key, width, height, uniform offset and canvas width')
     api = g.get('device_api', '55.15')   # the NVN API major.minor version nvnDeviceGetInteger reports (hle_nvn.c)
     if not re.fullmatch(r'\d+\.\d+', api): sys.exit(f'{g.id}: device_api must be major.minor: {api}')
     src = f'dm/games/{g.id}' if g.dir.parent == HERE else str(g.dir)
@@ -264,6 +280,10 @@ def header_one(g):
          f'#define DM_GAME_DRAW_BARRIERS_GAME {int(dbr == "game")}',
          f'#define DM_GAME_UPSCALER_KEYS {q(",".join(ups))}', f'#define DM_GAME_UPSCALER_N {len(ups)}',
          f'#define DM_GAME_VCONV_RANGE {int(vcr == "on")}',
+         *([f'#define DM_GAME_WIDE_CANVAS_FORMAT {q(canvas[0])}', f'#define DM_GAME_WIDE_CANVAS_MIN_WIDTH {int(canvas[1], 0)}'] if canvas else []),
+            *([f'#define DM_GAME_WIDE_GRADIENT_VS {q(gradient[0])}', f'#define DM_GAME_WIDE_GRADIENT_FS {q(gradient[1])}',
+                f'#define DM_GAME_WIDE_GRADIENT_WIDTH {int(gradient[2], 0)}', f'#define DM_GAME_WIDE_GRADIENT_HEIGHT {int(gradient[3], 0)}',
+                f'#define DM_GAME_WIDE_GRADIENT_OFFSET {int(gradient[4], 0)}', f'#define DM_GAME_WIDE_GRADIENT_CANVAS {int(gradient[5], 0)}'] if gradient else []),
          *([f'#define DM_GAME_NVN_API_MAJOR {api.split(".")[0]}', f'#define DM_GAME_NVN_API_MINOR {api.split(".")[1]}'] if g.get('device_api', '') else []),   # without the key: by the SDK version (hle_nvn.c nvn_api)
          '']
     return '\n'.join(L)
