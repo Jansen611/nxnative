@@ -316,6 +316,7 @@ static void read_layout(module_t *m, const char *dir) {
         else if (!strcmp(key, "DATA_OFF")) m->data_off = v;
         else if (!strcmp(key, "FPS_STATE_OFF")) m->fps_state_off = v;
         else if (!strcmp(key, "CAMERA_ASPECT")) m->camera_aspect = v == 1;
+        else if (!strcmp(key, "SCREEN_SIZE")) m->screen_size = v == 1;
         else if (!strcmp(key, "RENDER_SCALE")) m->render_scale_max = (uint32_t)v;
         else if (!strcmp(key, "MOVIE_NATIVE_COLOR_KEYS")) m->movie_native_color_keys = v == 1;
         else if (!strcmp(key, "STEP_MAX")) m->step_max = (uint32_t)v;
@@ -367,6 +368,21 @@ static pthread_mutex_t g_aspect_mu = PTHREAD_MUTEX_INITIALIZER;
 static _Atomic(uint8_t *) g_aspect_state;
 static float g_aspect_drawable;
 static int g_aspect_enabled;
+static int g_screen_size_enabled;
+static double g_screen_drawable;
+static int g_screen_drawable_seen;
+static int g_screen_auto_pending;
+
+// Apply the selected screen dimensions before the game creates its swap chain.
+static void ApplyScreenSize(double aspect) {
+    uint64_t size = DmScreenSizeForAspect(aspect);
+    uint32_t width = (uint32_t)size, height = (uint32_t)(size >> 32);
+    float actualAspect = size ? (float)width / (float)height : 0;
+    memcpy(dm_fps_state + 0x200, &size, sizeof size);
+    memcpy(dm_fps_state + 0x208, &actualAspect, sizeof actualAspect);
+    extern void mtl_present_screen(uint32_t w, uint32_t h); mtl_present_screen(width, height);
+    if (size) LOG("%s: experimental screen size %ux%u (picture and HUD unverified)", g_fps_mod, width, height);
+}
 
 // Publish the desired aspect to the build-verified camera stub.
 static void PublishCameraAspect(void) {
@@ -380,9 +396,14 @@ static void PublishCameraAspect(void) {
 // Keep the drawable's wider-than-16:9 shape for the camera when the feature is enabled.
 void dm_game_aspect_drawable(double width, double height) {
     if (!(width > 0 && height > 0) || !isfinite(width) || !isfinite(height)) return;
-    float wide = (float)DmWideScreenShape(width, height);
+    double wide = DmWideScreenShape(width, height);
     pthread_mutex_lock(&g_aspect_mu);
-    if (g_aspect_drawable != wide) { g_aspect_drawable = wide; PublishCameraAspect(); }
+    if (g_aspect_drawable != (float)wide) { g_aspect_drawable = (float)wide; PublishCameraAspect(); }
+    g_screen_drawable = wide; g_screen_drawable_seen = 1;
+    if (g_screen_auto_pending && g_screen_size_enabled && dm_fps_state) {
+        g_screen_auto_pending = 0;
+        ApplyScreenSize(g_screen_drawable);
+    }
     pthread_mutex_unlock(&g_aspect_mu);
 }
 
@@ -396,7 +417,8 @@ float dm_game_aspect(void) {
 }
 static void install_fps_state(module_t *m) {
     int cameraAspectEnabled = m->camera_aspect && !strcmp(m->name, "main") && !strcmp(m->build_id, "cd57b23fa4bbad65803d9788c01821ee");
-    if (m->fps_state_off > m->size || m->size - m->fps_state_off < (cameraAspectEnabled ? 0x208 : 0x40) || m->fps_state_off < m->key_page_off + m->key_page_size) die("%s: frame step state page out of range", m->name);
+    g_screen_size_enabled = m->screen_size && !strcmp(m->name, "main");
+    if (m->fps_state_off > m->size || m->size - m->fps_state_off < (g_screen_size_enabled ? 0x20c : cameraAspectEnabled ? 0x208 : 0x40) || m->fps_state_off < m->key_page_off + m->key_page_size) die("%s: frame step state page out of range", m->name);
     dm_fps_state = m->base + m->fps_state_off; g_fps_mod = m->name; dm_fps_step_max = (int)m->step_max;
     if (cameraAspectEnabled) {
         pthread_mutex_lock(&g_aspect_mu);
@@ -434,7 +456,7 @@ void dm_fps_state_apply(void) {
     // (Breath of the Wild 1.9.0's patches.py) render that shape: the output keeps its width (1920) and takes the height that gives the ratio; the 2/3-size layout
     // space stays whole: 1.43 → 1920x1344 and 1280x896. State +0x48 u32 output height, +0x4c u32 layout height, +0x50 its float; 0 = 16:9
     const char *as = getenv("DM_SCREEN_ASPECT");
-    if (as && *as && strcmp(as, "0") && strcmp(as, "auto")) {   // 0: 16:9; auto: the iOS front end resolves it to the screen's shape (a Mac window has none)
+    if (!g_screen_size_enabled && as && *as && strcmp(as, "0") && strcmp(as, "auto")) {   // 0: 16:9; auto: the iOS front end resolves it to the screen's shape (a Mac window has none)
         char *end; double a = strtod(as, &end);
         if (end == as || *end || !(a >= DM_SCREEN_SHAPE_MIN && a < DM_SCREEN_SHAPE_SWITCH)) LOG("[RED] DM_SCREEN_ASPECT=%s: a width / height from 1.3 up to 16:9; keeping 16:9", as);
         else {
@@ -465,6 +487,19 @@ void dm_fps_state_apply(void) {
             LOG("%s: screen shape: HUD moves out by %.0f (edge %.0f, listed widgets %.0f), panes %.0fx%.0f or larger stretched %.3f", g_fps_mod, anc[0], anc[2], anc[3], anc[4], anc[5], anc[1]);
             LOG("%s: screen shape %.3f: output 1920x%u, layout 1280x%u (DM_SCREEN_ASPECT; only builds with screen-shape stubs follow it)", g_fps_mod, a, oh, lh);
         }
+    }
+    if (g_screen_size_enabled) {
+        const char *choice = getenv("DM_SCREEN_SIZE");
+        pthread_mutex_lock(&g_aspect_mu);
+        g_screen_auto_pending = 0;
+        ApplyScreenSize(0);
+        if (choice && !strcmp(choice, "auto")) {
+            if (g_screen_drawable_seen) ApplyScreenSize(g_screen_drawable);
+            else g_screen_auto_pending = 1;
+        } else if (choice && *choice && strcmp(choice, "0")) {
+            LOG("[RED] DM_SCREEN_SIZE=%s: expected 0 or auto; keeping 16:9", choice);
+        }
+        pthread_mutex_unlock(&g_aspect_mu);
     }
     char cap[32]; snprintf(cap, sizeof cap, ", capped at %d fps", t);
     LOG("%s: frame step %s%s (%s)", g_fps_mod, !t ? "as the game sets it" : "in whole vsyncs decided by the host", t ? cap : "", e ? "DM_FPS_TARGET" : "game profile fps_target");

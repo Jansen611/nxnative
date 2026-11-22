@@ -43,6 +43,28 @@ def builds_of(g):   # {build ID: module name} of a profile's build rows (a profi
 
 
 class Registry(unittest.TestCase):
+    def test_hyrule_frame_step_keeps_frame_and_display_size_sites(self):
+        module = MODS[REPO / 'dm/games/01002B00111A2000/patches.py']
+        sites = []
+        emitted = []
+        ctx = docs_patches.types.SimpleNamespace(
+            here=lambda: 0x8000000, emit=emitted.append,
+            site=lambda offset, original: sites.append((offset, original)),
+            put=lambda offset, words, why: None, state=0x9000000,
+        )
+        module.FRAME_STEP['c3cf52bf2b05d7310884971b50bcccb8'](ctx)
+        self.assertIn((0x8d94b0, '4900c0f2'), sites)
+        self.assertIn((0x8d9498, '0887c0f2'), sites)
+        self.assertIn((0x17c376c, '5f010071'), sites)
+        self.assertIn((0x189ea34, '684e41bd'), sites)
+        self.assertIn('SCREEN_SIZE', module.CAPABILITIES['c3cf52bf2b05d7310884971b50bcccb8'])
+        self.assertEqual(emitted[-25], 0xf2c08708)
+        self.assertEqual(emitted[-23:-20], [0xf9410211, 0xb4000051, 0xaa1103e8])
+        self.assertEqual(emitted[-18:-14], [0xb9420211, 0x34000051, 0x2a1f03ea, 0x7100015f])
+        self.assertEqual(emitted[-13], 0xbd414e68)
+        self.assertEqual(emitted[-11:-4], [0xb9420a11, 0x34000131, 0x1e260111, 0x5291c730, 0x72a7fc70, 0x6b10023f, 0x54000081])
+        self.assertEqual(emitted[-3:-1], [0xb9420a11, 0x1e270228])
+
     def test_stub_data_address_accepts_interleaved_low_instruction(self):
         import struct
         from nso_asm import ADRP, LDRX

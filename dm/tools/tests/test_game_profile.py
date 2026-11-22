@@ -40,6 +40,47 @@ class PsoGPU(unittest.TestCase):
             self.assertIn(': pso_gpu takes 1-4 whitespace-separated GPU architectures', out, rows)
 
 
+class WideUI(unittest.TestCase):
+    BUILD = 'a' * 32
+    KEYS = ['0123456789abcdef', '123456789abcdef0', '23456789abcdef01', '3456789abcdef012', '456789abcdef0123']
+    REGISTERED = 'build\tv0\t1.0\tmain=' + BUILD + '\n'
+
+    def test_registered_build(self):
+        rows = self.REGISTERED + 'wide_ui\t' + ' '.join([self.BUILD, '1920', '1080', *self.KEYS]) + '\n'
+        self.assertEqual(header(rows), (0, ''))
+
+    def test_invalid_rules(self):
+        for values in ([self.BUILD, '0', '1080', *self.KEYS], [self.BUILD, '1920', 'bad', *self.KEYS],
+                       ['b' * 32, '1920', '1080', *self.KEYS], [self.BUILD, '1920', '1080', *self.KEYS[:-1]],
+                       [self.BUILD, '1920', '1080', *self.KEYS[:-1], 'invalid']):
+            result, output = header(self.REGISTERED + 'wide_ui\t' + ' '.join(values) + '\n')
+            self.assertNotEqual(result, 0, values)
+            self.assertIn('wide_ui requires a registered main build ID', output)
+
+    def test_multi_program_refused(self):
+        other = '0100000000F0F001'
+        rows = self.REGISTERED + 'wide_ui\t' + ' '.join([self.BUILD, '1920', '1080', *self.KEYS]) + '\n'
+        with tempfile.TemporaryDirectory() as directory:
+            for game_id in (ID, other):
+                Path(directory, game_id).mkdir()
+                (Path(directory, game_id) / 'game.tsv').write_text(TSV.replace(ID, game_id))
+            (Path(directory, ID) / 'game.tsv').write_text(TSV + rows + 'programs\t1=' + other + '\n')
+            result = subprocess.run([sys.executable, str(GAME), 'header', ID, str(Path(directory) / 'game.h')],
+                                    env={**os.environ, 'DM_GAMES_DIR': directory}, capture_output=True, text=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('DM_GAME_WIDE_UI_BUILD', result.stderr)
+
+    def test_map_rule(self):
+        rule = 'wide_map\t0123456789abcdef fedcba9876543210 1024 512\n'
+        wide = 'wide_ui\t' + ' '.join([self.BUILD, '1920', '1080', *self.KEYS]) + '\n'
+        self.assertEqual(header(self.REGISTERED + wide + rule), (0, ''))
+        for rows in (self.REGISTERED + rule, self.REGISTERED + wide + rule.replace('1024', '0'),
+                     self.REGISTERED + wide + rule.replace('fedcba9876543210', 'invalid')):
+            result, output = header(rows)
+            self.assertNotEqual(result, 0)
+            self.assertIn('wide_map requires wide_ui', output)
+
+
 
 MAP = ('# kind: evidence  Test shaders\n# column 5 records where each key first appears\npackage\tindex\tstage\tdm_ctl_sha16\tsource\n'
        'cs_other.bin\t1\tcompute\tc56db3d5a0f1b5af\t/Lib/agl/agl_resource.Nin_Ounce_NVN2.release.sarc.zs/agl_ndsr.pck#NDSR@0x124900\n'

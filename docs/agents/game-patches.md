@@ -21,7 +21,7 @@ A patch's binding is what its correctness is anchored to, from the loosest. A pa
 
 ## Gaps
 
-Every patch bound tighter than it could be: the open gaps, then the blocked, kept and unreviewed ones; in each, those reaching the most games first (the games whose profiles register the builds it touches), then those farthest from their goal.
+Every patch bound tighter than it could be: the open gaps, then the blocked, kept and unreviewed ones; in each, those reaching the most games first (the games whose profiles register the builds it touches), then those farthest from their goal. 1 patch has no reviewed goal yet.
 
 | Now → goal | Patch | Purpose | Status | Evidence | Games | Where | Why |
 |---|---|---|---|---|---|---|---|
@@ -53,6 +53,7 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
 | `build` → `game` | 60 fps frame step (112 sites) | frame rate | kept: 1.0.1 (2019) is the last update; a function match would serve no other build of this game | checked: nso_fnmap of its 112 sites into those four mains (2026-11-09) | 1 | [ASTRAL CHAIN](../../dm/games/01007300020FA000/README.md) | the game's own clock and timers (a community 60 fps mod on the host's frame step). PlatinumGames' other games do not share them: none of its 15 functions has an exact match in Bayonetta, Bayonetta 2, Bayonetta 3 or NieR:Automata |
 | `build` → `game` | 60 fps frame step and render scale (ksys::VFR) | frame rate | kept: 45 sites in 34 functions to fingerprint for an update that may not come (1.9.0, the Switch 2 Edition release); convert when a new build appears | checked: nso_fnmap of its original 44 sites into those 13 mains (2026-11-09) | 1 | [The Legend of Zelda: Breath of the Wild](../../dm/games/01007EF00011E000/README.md) | the game's own frame code; the frame-step state page is general. No engine sibling shares it: none of its 34 functions has an exact match in Tears of the Kingdom, SMO, MK8D, ACNH, Splatoon 2 / 3, Kirby, Mario Party, Ocarina, Smash, Metroid Dread or Origami King (only the widescreen stubs' sead::PerspectiveProjection functions recur) |
 | `build` → `game` | Hagi coroutine stack region 1 GB → 64 MB | memory | kept: 1.1.4 is the last update; a match over Hagi would serve no other build of this game | checked: the final build 1.1.4 (the only one the profile packs), 2026-11-04 | 1 | [Super Mario 3D All-Stars: Super Mario Sunshine](../../dm/games/010049900F546002/README.md) | a size inside Hagi's own code: nothing the host sees tells a 1 GB reservation it can shrink from one it cannot |
+| `build` → unreviewed | experimental screen size on 1.3.0 | rendering | unreviewed | judgement | 1 | [Hyrule Warriors: Age of Calamity](../../dm/games/01002B00111A2000/README.md) | the display size instruction was checked in the rewritten 1.3.0 main; runtime picture and HUD behaviour remain unverified |
 
 ## Summary
 
@@ -68,7 +69,7 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
 | [FINAL FANTASY TACTICS - The Ivalice Chronicles](#final-fantasy-tactics---the-ivalice-chronicles) | 2 | 0 | 0 | 0 | 0 | `build` → `game` |
 | [Fire Emblem: Three Houses](#fire-emblem-three-houses) | 7 | 0 | 0 | 0 | 0 | `build` → `game` |
 | [Hades II](#hades-ii) | 0 | 0 | 1 | 0 | 0 | `game` |
-| [Hyrule Warriors: Age of Calamity](#hyrule-warriors-age-of-calamity) | 0 | 0 | 10 | 0 | 0 | `game`, `build` → `game` |
+| [Hyrule Warriors: Age of Calamity](#hyrule-warriors-age-of-calamity) | 0 | 0 | 13 | 0 | 0 | `build` → unreviewed, `game`, `build` → `game` |
 | [Kirby's Dream Buffet](#kirbys-dream-buffet) | 0 | 0 | 1 | 0 | 0 | `game` |
 | [Luigi's Mansion 3](#luigis-mansion-3) | 0 | 0 | 0 | 0 | 1 | `build` → `engine` |
 | [Mario + Rabbids® Sparks of Hope](#mario--rabbids-sparks-of-hope) | 1 | 0 | 0 | 0 | 0 | `build` → `game` |
@@ -338,15 +339,20 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
 
 [Hyrule Warriors: Age of Calamity](../../dm/games/01002B00111A2000/README.md), `01002B00111A2000`, [patches.py](../../dm/games/01002B00111A2000/patches.py).
 
+- **`build` → unreviewed**, rendering, unreviewed, judgement: experimental screen size on 1.3.0. The display size instruction was checked in the rewritten 1.3.0 main; runtime picture and HUD behaviour remain unverified
 - **`game`**, frame rate, at goal, checked: v458752 main: one function of each fingerprint, the five sites and the decoded addresses read by disassembly; nso_fnmap into those five mains (2026-11-09): 60 fps frame step: the KIDS frame task, frame-rate block and event cutscene counters (any build but 1.3.0). The game's own frame code, found by its four functions' fingerprints, the KTGL device global and the frame-rate block read from their code. No KTGL sibling shares it: the KIDS task has no exact match in Three Hopes, Taiko Risshiden V DX, Three Houses, Hyrule Warriors: Definitive Edition or Age of Imprisonment
 - **`build` → `game`**, frame rate, blocked: 1.3.0's main is on neither drive to fingerprint (v458752 is the update on them), judgement: 60 fps frame step on 1.3.0 (the same stub at its known addresses). The stub above, placed at 1.3.0's addresses: the matched rule would serve it once its functions are fingerprinted
 
-- **1.3.0 `main`** `c3cf52bf…` ([patches.py:133](../../dm/games/01002B00111A2000/patches.py#L133))
+- **1.3.0 `main`** `c3cf52bf…` ([patches.py:153](../../dm/games/01002B00111A2000/patches.py#L153))
   - frame step `+0x857d7c`: event cutscene's frame: stepped on every other update at a 60 fps cap (state page vsyncs per update; 30 fps frames, as on the Switch)
   - frame step `+0x857da0`: event cutscene's frames left: stepped on every other update at a 60 fps cap (state page vsyncs per update; 30 fps frames, as on the Switch)
+  - frame step `+0x8d9498`: experimental screen size: use the requested packed width and height, or the original size
   - frame step `+0x8d94b0`: KTGL device config present interval: 1 above a 30 fps cap, else the game's 2 (state page target fps)
   - frame step `+0x166dab4`: KIDS frame task: fps and the frame-rate block = the cap, vsyncs per update marked; device frame rate 59.94 / vsyncs (state page target fps; 0 = the game's 30)
   - frame step `+0x166dc60`: KIDS frame task: the frame-rate object's steps × its fps × vsyncs per update / 60 (state page target fps; 0 = as the game sets them)
+  - frame step `+0x17c376c`: experimental screen size: select the configured size for the swap chain when enabled
+  - frame step `+0x189ea34`: experimental screen shape: adjust 16:9 perspective projections to the requested aspect
+  - launcher capabilities: SCREEN_SIZE
 - **function-matched frame step** (`main` of builds without FRAME_STEP): 60 fps frame step: the KIDS frame task, frame-rate block and event cutscene counters: a function of 0x1078 bytes, `+0x134`, `+0x2e0` in it; nnMain, a function of 0x3a40 bytes, `+0x1e60` in it; scene update, a function of 0xb88 bytes, `+0x86c`, `+0x890` in it; frame-rate block writer, a function of 0x7c bytes,  in it
 
 ### Kirby's Dream Buffet
@@ -603,7 +609,7 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
 
   - render scale stub (the launcher offers DM_RENDER_SCALE)
   - launcher capabilities: CAMERA_ASPECT
-  - host [loader.c:398](../../dm/host/loader.c#L398): build check
+  - host [loader.c:419](../../dm/host/loader.c#L419): build check
 
 ### The Legend of Zelda: Link's Awakening
 

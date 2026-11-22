@@ -55,6 +55,8 @@ fps_hold	off
 # over the bound ranges that was millions of vertices a frame in battle (26 fps at any target on the Mac); only over the vertices each draw reads. Shadow vertex inputs
 # (nvn_mtl.m vin_on) now take those attributes on the GPU; this still serves the draws that keep the CPU conversion (transform feedback, DM_NVN_VCONV_CPU=1)
 vconv_range	on
+wide_ui	c3cf52bf2b05d7310884971b50bcccb8 1920 1080 23cc425cbc9f2d26 6f444fbccdc31d3d cfa997bd39db7a25 e275b545afb53959 3b7d5c2943fae6b0
+wide_map	ed6a148ff8a04d3c 7b401a19f315dc2a 1024 512
 
 # ---- Shader split ----
 shader_groups	/asset/system.rdb=system /asset/MaterialEditor.rdb=material /asset/FieldEditor4.rdb=field /asset/CharacterEditor.rdb=character /asset/EventMaker3.rdb=event /asset/ScreenLayout.rdb=layout /asset/RRPreview.rdb=preview /asset/KIDSSystemResource.rdb=kids

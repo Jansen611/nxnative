@@ -36,6 +36,7 @@
 #include "nvn_refl.h"
 #include "nvn_border.h"
 #include "nvn_primitive.h"
+#include "nvn_wide_ui.h"
 #include "nvn_link_drain.h"
 #include "nvn_link_latch.h"
 #include "nvn_timestamp.h"
@@ -16085,6 +16086,101 @@ static int IsWideGradient(NvProg *program, const tex_t *texture) {
     return 0;
 #endif
 }
+#ifdef DM_GAME_WIDE_UI_BUILD
+static int DmWideUiSelected(NSUInteger width, NSUInteger height) {
+    extern uint8_t *dm_fps_state;
+    if (!dm_fps_state || !height || width * DM_GAME_WIDE_UI_HEIGHT <= height * DM_GAME_WIDE_UI_WIDTH) return 0;
+    int screenSizeEnabled = 0;
+    for (int i = 0; i < g_nmod; i++)
+        if (!strcmp(g_mod[i].name, "main") && g_mod[i].screen_size) screenSizeEnabled = 1;
+    if (!screenSizeEnabled || strcmp(dm_main_build(), DM_GAME_WIDE_UI_BUILD)) return 0;
+    uint64_t selected; memcpy(&selected, dm_fps_state + 0x200, sizeof selected);
+    return DmWideUiEnabled(DM_GAME_WIDE_UI_BUILD, dm_main_build(), screenSizeEnabled, selected, (uint32_t)width, (uint32_t)height,
+                           DM_GAME_WIDE_UI_WIDTH, DM_GAME_WIDE_UI_HEIGHT);
+}
+static double DmWideUiScale(NvProg *program, const p_draw_idx *draw, NSUInteger width, NSUInteger height) {
+    if (!program || !program->sh[0] || !height || width * DM_GAME_WIDE_UI_HEIGHT <= height * DM_GAME_WIDE_UI_WIDTH) return 1;
+    char shaderKey[17]; memcpy(shaderKey, program->sh[0]->key, 16); shaderKey[16] = 0;
+    if (!DmWideUiShader(DM_GAME_WIDE_UI_VERTICES, shaderKey) || !DmWideUiSelected(width, height)) return 1;
+    const p_bind_buf *uniform = &S.ubo[0][0];
+    void *buffer; uint64_t offset, gpu;
+    if (!uniform->addr || uniform->size < 144 || uniform->addr > UINT64_MAX - 144 ||
+        g_pend_over || nvn_sparse_alias(uniform->addr, uniform->addr + 144) || geo_cpu_hazard(uniform->addr, 144) ||
+        (g_nubd && ubd_hits(uniform->addr, uniform->addr + 144)) ||
+        !mtl_gpu_addr(uniform->addr, uniform->size, &buffer, &offset, &gpu)) return 1;
+    const void *contents = [(__bridge id<MTLBuffer>)buffer contents];
+    if (!contents) return 1;
+    float projection[36]; memcpy(projection, (const char *)contents + offset, sizeof projection);
+    if (!DmWideUiProjection(projection, DM_GAME_WIDE_UI_WIDTH, DM_GAME_WIDE_UI_HEIGHT)) return 1;
+    if (!strncmp(shaderKey, DM_GAME_WIDE_UI_OVERLAY_VERTEX, 16) && program->sh[1] &&
+        !strncmp(program->sh[1]->key, DM_GAME_WIDE_UI_OVERLAY_FRAGMENT, 16)) {
+        int smallTexture = 0, knownTexture = 0, textureId = (int)(S.tex[1][0] & 0xfffff);
+        os_unfair_lock_lock(&g_rmu);
+        if (textureId > 0 && textureId < g_ntreg && g_treg[textureId].ok) {
+            knownTexture = 1;
+            smallTexture = g_treg[textureId].t.d.width == 4 && g_treg[textureId].t.d.height == 4;
+        }
+        os_unfair_lock_unlock(&g_rmu);
+        if (!knownTexture) return 1;
+        if (smallTexture) {
+            if (!draw || draw->ind || draw->mdi_cnt || draw->prim != 4 || draw->instances != 1) return 1;
+            if (draw->count != 6) return ((double)DM_GAME_WIDE_UI_WIDTH / DM_GAME_WIDE_UI_HEIGHT) * height / width;
+            if (draw->itype != 1 || S.restart.on || S.nattr <= 2 ||
+                S.attr[0].fmt != 0xa || S.attr[0].stream != 0 || S.attr[0].offset != 40 ||
+                S.attr[2].fmt != 0x22 || S.attr[2].stream != 0 || S.attr[2].offset != 0 ||
+                S.stream[0].stride != 44 || S.stream[0].divisor || !draw->ibuf ||
+                draw->ibuf > UINT64_MAX - 12 || g_pend_over || nvn_sparse_alias(draw->ibuf, draw->ibuf + 12) ||
+                geo_cpu_hazard(draw->ibuf, 12) || (g_nubd && ubd_hits(draw->ibuf, draw->ibuf + 12)) ||
+                !nvn_host_readable(draw->ibuf, 12)) return 1;
+            uint16_t indices[6]; memcpy(indices, (const void *)(uintptr_t)draw->ibuf, sizeof indices);
+            DmWideUiVertex vertices[6];
+            for (int i = 0; i < 6; i++) {
+                int64_t index = (int64_t)indices[i] + draw->base_vertex;
+                if (index < 0 || (uint64_t)index * 44 + 44 > S.vbuf[0].size || !S.vbuf[0].address ||
+                    S.vbuf[0].address > UINT64_MAX - (uint64_t)index * 44 - 44) return 1;
+                uint64_t address = S.vbuf[0].address + (uint64_t)index * 44;
+                if (g_pend_over || nvn_sparse_alias(address, address + 44) || geo_cpu_hazard(address, 44) ||
+                    (g_nubd && ubd_hits(address, address + 44)) || !nvn_host_readable(address, 44)) return 1;
+                memcpy(&vertices[i], (const void *)(uintptr_t)address, 12);
+                memcpy(&vertices[i].objectIndex, (const void *)(uintptr_t)(address + 40), sizeof(float));
+            }
+            if (DmWideUiFullOverlay(projection, vertices, DM_GAME_WIDE_UI_WIDTH, DM_GAME_WIDE_UI_HEIGHT)) return 1;
+        }
+    }
+    return ((double)DM_GAME_WIDE_UI_WIDTH / DM_GAME_WIDE_UI_HEIGHT) * height / width;
+}
+#ifdef DM_GAME_WIDE_MAP_VERTEX
+static double DmWideMapOffset(NvProg *program, const p_draw_idx *draw, NSUInteger width, NSUInteger height) {
+    if (!program || !program->sh[0] || !program->sh[1] ||
+        strncmp(program->sh[0]->key, DM_GAME_WIDE_MAP_VERTEX, 16) ||
+        strncmp(program->sh[1]->key, DM_GAME_WIDE_MAP_FRAGMENT, 16) ||
+        !draw || draw->prim != 4 || draw->instances != 1 || draw->ind || draw->mdi_cnt || !S.ds.st ||
+        S.ds.sf_f != 3 || S.ds.sf_b != 3 || S.st_ref[0] != 1 || S.st_ref[1] != 1 ||
+        S.st_vmask[0] != 1 || S.st_vmask[1] != 1 || S.st_wmask[0] != 1 || S.st_wmask[1] != 1 ||
+        !DmWideUiSelected(width, height)) return 0;
+    if ((S.has_vp && (S.vp[0][0] != 0 || S.vp[0][1] != 0 || S.vp[0][2] != width || S.vp[0][3] != height)) ||
+        (R.has_sc && (R.sc.x != 0 || R.sc.y != 0 || R.sc.w != width || R.sc.h != height))) return 0;
+    int textureId = (int)(S.tex[1][0] & 0xfffff), mapTexture = 0;
+    os_unfair_lock_lock(&g_rmu);
+    if (textureId > 0 && textureId < g_ntreg && g_treg[textureId].ok)
+        mapTexture = g_treg[textureId].t.d.width == DM_GAME_WIDE_MAP_TEXTURE_WIDTH &&
+                     g_treg[textureId].t.d.height == DM_GAME_WIDE_MAP_TEXTURE_HEIGHT;
+    os_unfair_lock_unlock(&g_rmu);
+    if (!mapTexture) return 0;
+    const p_bind_buf *uniform = &S.ubo[0][0];
+    void *buffer; uint64_t offset, gpu;
+    if (!uniform->addr || uniform->size < 16 || uniform->addr > UINT64_MAX - 16 ||
+        g_pend_over || nvn_sparse_alias(uniform->addr, uniform->addr + 16) || geo_cpu_hazard(uniform->addr, 16) ||
+        (g_nubd && ubd_hits(uniform->addr, uniform->addr + 16)) ||
+        !mtl_gpu_addr(uniform->addr, uniform->size, &buffer, &offset, &gpu)) return 0;
+    const void *contents = [(__bridge id<MTLBuffer>)buffer contents];
+    if (!contents) return 0;
+    float projection[4]; memcpy(projection, (const char *)contents + offset, sizeof projection);
+    if (!DmWideMapProjection(projection, (float)width, (float)height)) return 0;
+    return DmWideMapMargin((uint32_t)width, (uint32_t)height, DM_GAME_WIDE_UI_WIDTH, DM_GAME_WIDE_UI_HEIGHT);
+}
+#endif
+#endif
 static void draw_(const p_draw *dw, const p_draw_idx *di) {
     g_draw_binst = (uint32_t)(dw ? dw->base_instance : di ? di->base_instance : 0);   // c0 + 0x644 of the stages that read the driver segment (encode_args)
     if (passdump()) { NvProg *p = g_geo_program ? g_geo_program : S.prog ? prog_get(S.prog) : nil;
@@ -16245,6 +16341,9 @@ static void draw_(const p_draw *dw, const p_draw_idx *di) {
     // Viewport / scissor (clamped within the target size)
     NSUInteger tw = g_pass.tw, th = g_pass.th;
     double aspectScale = 1, effectiveAspect = dm_game_aspect();
+#ifdef DM_GAME_WIDE_UI_BUILD
+    aspectScale = DmWideUiScale(pr, di, tw, th);
+#endif
     if (effectiveAspect > 16.0 / 9.0 && R.rt.n > 0 && R.rt.color[0] && R.rt.color[0]->serial == g_aspect_canvas &&
         (dw ? dw->count : di ? di->count : 0) == 6) {
         int scenePicture = 0, textureId = (int)(S.tex[1][0] & 0xfffff);
@@ -16268,6 +16367,9 @@ static void draw_(const p_draw *dw, const p_draw_idx *di) {
     }
     { MTLViewport v = S.has_vp ? (MTLViewport){S.vp[0][0], S.vp[0][1], S.vp[0][2], S.vp[0][3], S.dr[0], S.dr[1]} : (MTLViewport){0, 0, tw, th, 0, 1};
       if (aspectScale != 1) { v.originX = tw / 2.0 + (v.originX - tw / 2.0) * aspectScale; v.width *= aspectScale; }
+#if defined(DM_GAME_WIDE_UI_BUILD) && defined(DM_GAME_WIDE_MAP_VERTEX)
+      v.originX += DmWideMapOffset(pr, di, tw, th);
+#endif
       if (vp_origin_ll()) { v.originY += v.height; v.height = -v.height; }   // the viewport command's recording device origin
       // Viewport swizzle: NEGATIVE_Y negates clip y, the same as the viewport flipped about its centre; facing is decided after it on the GPU as in Metal, so the winding stays.
       // Other swizzles (axis exchanges, negated x / z / w) are no viewport change and are drawn unswizzled

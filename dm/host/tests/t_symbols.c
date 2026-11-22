@@ -21,7 +21,8 @@ static uint8_t *test_section(const struct mach_header_64 *mh, const char *seg, c
 #define getsectiondata test_section
 #include "../hle.c"
 #include "../loader.c"
-void mtl_present_screen(uint32_t w, uint32_t h) { (void)w; (void)h; }   // loader.c: a screen taller than 16:9; no renderer here
+static uint32_t screen_width, screen_height;
+void mtl_present_screen(uint32_t w, uint32_t h) { screen_width = w; screen_height = h; }
 #undef getsectiondata
 
 struct dm_flags g_flag;
@@ -107,6 +108,61 @@ static void check_language_bindings(void) {
     force_sec = forces; force_sec_n = 3;
 }
 
+static void check_screen_size_state(void) {
+    uint8_t state[0x1000] = {0};
+    uint64_t size;
+    float aspect;
+    dm_fps_state = state; g_fps_mod = "main"; g_screen_size_enabled = 1;
+    unsetenv("DM_SCREEN_ASPECT"); unsetenv("DM_SCREEN_SIZE"); unsetenv("DM_HYRULE_ASPECT");
+    dm_fps_state_apply();
+    memcpy(&size, state + 0x200, sizeof size); memcpy(&aspect, state + 0x208, sizeof aspect);
+    assert(size == 0 && aspect == 0 && screen_width == 0 && screen_height == 0);
+    setenv("DM_HYRULE_ASPECT", "2.166666", 1);
+    dm_fps_state_apply();
+    memcpy(&size, state + 0x200, sizeof size); memcpy(&aspect, state + 0x208, sizeof aspect);
+    assert(size == 0 && aspect == 0 && screen_width == 0 && screen_height == 0);
+    setenv("DM_HYRULE_ASPECT", "2.166666", 1); g_screen_size_enabled = 0;
+    dm_fps_state_apply();
+    memcpy(&size, state + 0x200, sizeof size); memcpy(&aspect, state + 0x208, sizeof aspect);
+    assert(size == 0 && aspect == 0 && screen_width == 0 && screen_height == 0);
+    g_screen_size_enabled = 1;
+    setenv("DM_SCREEN_SIZE", "0", 1);
+    dm_game_aspect_drawable(2340, 1080);
+    dm_fps_state_apply();
+    memcpy(&size, state + 0x200, sizeof size); memcpy(&aspect, state + 0x208, sizeof aspect);
+    assert(size == 0 && aspect == 0 && screen_width == 0 && screen_height == 0);
+    setenv("DM_SCREEN_SIZE", "auto", 1);
+    g_screen_drawable_seen = 0;
+    dm_fps_state_apply();
+    assert(g_screen_auto_pending);
+    dm_game_aspect_drawable(1024, 768);
+    memcpy(&size, state + 0x200, sizeof size);
+    assert(size == 0 && !g_screen_auto_pending);
+    dm_game_aspect_drawable(2340, 1080);
+    memcpy(&size, state + 0x200, sizeof size);
+    assert(size == 0);
+    g_screen_drawable_seen = 0;
+    dm_fps_state_apply();
+    dm_game_aspect_drawable(2160, 1080);
+    memcpy(&size, state + 0x200, sizeof size); memcpy(&aspect, state + 0x208, sizeof aspect);
+    assert(size == ((uint64_t)1080 << 32 | 2160) && aspect == 2.0f);
+    g_screen_drawable_seen = 0;
+    dm_game_aspect_drawable(3000, 1080);
+    dm_fps_state_apply();
+    memcpy(&size, state + 0x200, sizeof size); memcpy(&aspect, state + 0x208, sizeof aspect);
+    assert(size == ((uint64_t)1080 << 32 | 2336) && aspect == 2336.0f / 1080.0f);
+    dm_game_aspect_drawable(1920, 1080);
+    dm_fps_state_apply();
+    memcpy(&size, state + 0x200, sizeof size);
+    assert(size == 0 && screen_width == 0 && screen_height == 0);
+    setenv("DM_SCREEN_SIZE", "invalid", 1);
+    dm_fps_state_apply();
+    memcpy(&size, state + 0x200, sizeof size);
+    assert(size == 0 && !g_screen_auto_pending);
+    unsetenv("DM_SCREEN_SIZE"); unsetenv("DM_HYRULE_ASPECT");
+    g_screen_size_enabled = 0; g_screen_drawable_seen = 0; dm_fps_state = NULL;
+}
+
 int main(void) {
     // Empty/missing sections must still give misses after lazy initialization.
     assert(!hle_implements("absent")); assert(!hle_implements("absent"));
@@ -178,6 +234,7 @@ int main(void) {
     g_loaded = NULL; g_nloaded = 0; force_sec = forces; force_sec_n = 3;
     reset_sections();
     check_language_bindings();
+    check_screen_size_state();
     puts("Language list and count: verified SDK exports and paired host fallback: OK");
     puts("Guest aliases: bound to the loaded definition over the module's own, orphan left as bound, alias to a taken-over name rejected: OK");
     puts("Symbol indexes: collisions, duplicate precedence/rejection, misses, wrappers and 4096 reusable stubs: OK");

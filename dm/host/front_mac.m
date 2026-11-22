@@ -1612,6 +1612,11 @@ void front_run(void (*guest)(void)) {
                                                     styleMask:NSWindowStyleMaskTitled | NSWindowStyleMaskClosable | NSWindowStyleMaskResizable
                                                       backing:NSBackingStoreBuffered defer:NO];
         win.title = @(DM_GAME_NAME);   // the game profile's name (game name label)
+                const char *screenChoice = getenv("DM_SCREEN_SIZE"), *startFullscreen = getenv("DM_FULLSCREEN");
+                if (screenChoice && !strcmp(screenChoice, "auto") && startFullscreen && strcmp(startFullscreen, "0")) {
+                        NSScreen *screen = win.screen ?: NSScreen.mainScreen;
+                        if (screen) dm_game_aspect_drawable(screen.frame.size.width, screen.frame.size.height);
+                }
         // Fullscreen: without FullScreenPrimary the green button only zooms the window. The present path already scales
         // the game picture to fit the drawable with black bars around it, so fullscreen keeps the game's aspect ratio.
         win.collectionBehavior = NSWindowCollectionBehaviorFullScreenPrimary;

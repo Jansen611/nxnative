@@ -5,16 +5,37 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 import zipfile
 
 REPO = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(REPO / 'dm/games'))
 import game
+import settings
 sys.path.insert(0, str(REPO / 'dm/tools'))
 import shader_lib
 
 
 class ProfilePackTests(unittest.TestCase):
+    def test_screen_size_choices_require_the_verified_build(self):
+        with tempfile.TemporaryDirectory() as temporary, patch.object(settings.nacp, 'languages', return_value=[]):
+            patched = Path(temporary)
+            fixups = patched / 'main.fixups.tsv'
+            for platform in ('ios', 'mac'):
+                with self.subTest(platform=platform), patch.dict(os.environ, {'SETTINGS_PLATFORM': platform}):
+                    fixups.write_text('# SCREEN_SIZE\t1\n')
+                    rows = settings.build('01002B00111A2000', patched, patched / 'control.nacp')['settings']
+                    choice, = [row for row in rows if row['env'] == 'DM_SCREEN_SIZE']
+                    self.assertEqual(choice['default'], '0')
+                    self.assertEqual(choice['level'], 'basic')
+                    self.assertEqual(choice['options'], [['0', 'Switch 16:9'], ['auto', 'Match screen']])
+                    fixups.write_text('')
+                    rows = settings.build('01002B00111A2000', patched, patched / 'control.nacp')['settings']
+                    self.assertFalse(any(row['env'] == 'DM_SCREEN_SIZE' for row in rows))
+                    rows = settings.build('01007EF00011E000', patched, patched / 'control.nacp')['settings']
+                    self.assertTrue(any(row['env'] == 'DM_SCREEN_ASPECT' for row in rows))
+                    self.assertFalse(any(row['env'] == 'DM_SCREEN_SIZE' for row in rows))
+
     def test_an_image_without_pulling_libraries_stops_an_app_that_needs_them(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary); lib = root / 'b-fixture'; lib.mkdir(); (lib / 'k_b.metallib').write_text('lib'); (lib / 'k_bp.metallib').write_text('pull')

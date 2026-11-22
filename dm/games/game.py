@@ -133,7 +133,7 @@ def header_multi(progs):
         d = {m[1]: m[2] for m in (re.match(r'#define (DM_GAME_\w+) (.*)$', ln) for ln in header_one(g).splitlines()) if m}
         rows.append((n, g, d)); keys += [k for k in d if k not in keys]
     ARR = {'DM_GAME_MODULES': 0, 'DM_GAME_BUILD_MODULES': 2, 'DM_GAME_DISPLAY_VERSIONS': 2}   # brace lists, of strings (their entries in rows of 2 for the two), each padded with NULLs in the table
-    for k in ('DM_GAME_SHARED_FONT_TTF', 'DM_GAME_NVN_API_MAJOR', 'DM_GAME_NVN_API_MINOR'):
+    for k in ('DM_GAME_SHARED_FONT_TTF', 'DM_GAME_NVN_API_MAJOR', 'DM_GAME_NVN_API_MINOR', 'DM_GAME_WIDE_UI_BUILD'):
         if k in keys: sys.exit(f'{k}: a key behind this macro (shared_font, device_api) is tested by the preprocessor and cannot differ per program; not supported with programs')
     typ = lambda v: 'const char *' if v.startswith('"') else 'uint64_t ' if v.endswith('ull') else 'int '
     fld = lambda k: k[len('DM_GAME_'):].lower()
@@ -232,6 +232,25 @@ def header_one(g):
         except ValueError:
             valid_gradient = False
         if not valid_gradient: sys.exit(f'{g.id}: wide_gradient requires vertex key, fragment key, width, height, uniform offset and canvas width')
+    wide_ui = g.words('wide_ui', '')
+    if wide_ui:
+        try:
+            valid_ui = (len(wide_ui) == 8 and re.fullmatch(r'[0-9a-f]{32}', wide_ui[0])
+                        and any(build.get('main') == wide_ui[0] for build in g.builds().values())
+                        and all(0 < int(value, 0) <= 8192 for value in wide_ui[1:3])
+                        and all(re.fullmatch(r'[0-9a-f]{16}', key) for key in wide_ui[3:]))
+        except ValueError:
+            valid_ui = False
+        if not valid_ui: sys.exit(f'{g.id}: wide_ui requires a registered main build ID, width, height, four vertex keys and one fragment key')
+    wide_map = g.words('wide_map', '')
+    if wide_map:
+        try:
+            valid_map = (bool(wide_ui) and len(wide_map) == 4 and
+                         all(re.fullmatch(r'[0-9a-f]{16}', key) for key in wide_map[:2]) and
+                         all(0 < int(value, 0) <= 8192 for value in wide_map[2:]))
+        except ValueError:
+            valid_map = False
+        if not valid_map: sys.exit(f'{g.id}: wide_map requires wide_ui, vertex and fragment keys, and texture width and height')
     api = g.get('device_api', '55.15')   # the NVN API major.minor version nvnDeviceGetInteger reports (hle_nvn.c)
     if not re.fullmatch(r'\d+\.\d+', api): sys.exit(f'{g.id}: device_api must be major.minor: {api}')
     src = f'dm/games/{g.id}' if g.dir.parent == HERE else str(g.dir)
@@ -281,6 +300,11 @@ def header_one(g):
          f'#define DM_GAME_UPSCALER_KEYS {q(",".join(ups))}', f'#define DM_GAME_UPSCALER_N {len(ups)}',
          f'#define DM_GAME_VCONV_RANGE {int(vcr == "on")}',
          *([f'#define DM_GAME_WIDE_CANVAS_FORMAT {q(canvas[0])}', f'#define DM_GAME_WIDE_CANVAS_MIN_WIDTH {int(canvas[1], 0)}'] if canvas else []),
+            *([f'#define DM_GAME_WIDE_UI_BUILD {q(wide_ui[0])}', f'#define DM_GAME_WIDE_UI_WIDTH {int(wide_ui[1], 0)}',
+                f'#define DM_GAME_WIDE_UI_HEIGHT {int(wide_ui[2], 0)}', f'#define DM_GAME_WIDE_UI_VERTICES {q(",".join(wide_ui[3:7]))}',
+                f'#define DM_GAME_WIDE_UI_OVERLAY_VERTEX {q(wide_ui[3])}', f'#define DM_GAME_WIDE_UI_OVERLAY_FRAGMENT {q(wide_ui[7])}'] if wide_ui else []),
+            *([f'#define DM_GAME_WIDE_MAP_VERTEX {q(wide_map[0])}', f'#define DM_GAME_WIDE_MAP_FRAGMENT {q(wide_map[1])}',
+                f'#define DM_GAME_WIDE_MAP_TEXTURE_WIDTH {int(wide_map[2], 0)}', f'#define DM_GAME_WIDE_MAP_TEXTURE_HEIGHT {int(wide_map[3], 0)}'] if wide_map else []),
             *([f'#define DM_GAME_WIDE_GRADIENT_VS {q(gradient[0])}', f'#define DM_GAME_WIDE_GRADIENT_FS {q(gradient[1])}',
                 f'#define DM_GAME_WIDE_GRADIENT_WIDTH {int(gradient[2], 0)}', f'#define DM_GAME_WIDE_GRADIENT_HEIGHT {int(gradient[3], 0)}',
                 f'#define DM_GAME_WIDE_GRADIENT_OFFSET {int(gradient[4], 0)}', f'#define DM_GAME_WIDE_GRADIENT_CANVAS {int(gradient[5], 0)}'] if gradient else []),

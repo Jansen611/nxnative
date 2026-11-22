@@ -1,5 +1,6 @@
 #pragma once
 #include <math.h>
+#include <stdint.h>
 #include <string.h>
 
 #define DM_SCREEN_SHAPE_MIN 1.3
@@ -23,6 +24,14 @@ static inline unsigned DmTallerScreenHeight(double ratio) {
     if (height > 1920.0 / DM_SCREEN_SHAPE_MIN)
         height = (unsigned)(1920.0 / DM_SCREEN_SHAPE_MIN / 12.0) * 12;
     return height;
+}
+
+static inline uint64_t DmScreenSizeForAspect(double aspect) {
+    if (!isfinite(aspect) || aspect < DM_SCREEN_SHAPE_MIN || aspect > DM_SCREEN_SHAPE_MAX || fabs(aspect - DM_SCREEN_SHAPE_SWITCH) <= 0.001) return 0;
+    uint32_t width = 1920, height = 1080;
+    if (aspect > DM_SCREEN_SHAPE_SWITCH) width = (uint32_t)(aspect * 1080.0 / 16.0 + 0.5) * 16;
+    else height = DmTallerScreenHeight(aspect);
+    return (uint64_t)height << 32 | width;
 }
 
 typedef struct {

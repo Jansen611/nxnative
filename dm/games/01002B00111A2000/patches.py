@@ -120,6 +120,37 @@ def stub(ctx, kids, nn_main, scene, block, device, rate=None):
 
 def frame_step(ctx):   # 1.3.0 (v327680): the addresses found there; its main is not on the drives to fingerprint, so it keeps this build entry
     stub(ctx, kids=0x166d980, nn_main=0x8d94b0 - 0x1e60, scene=0x857510, block=0x269e150, device=0x2bac798, rate=0x1ef5f3c)
+    site = 0x8d9498
+    ctx.site(site, '0887c0f2')
+    start = ctx.here()
+    ctx.emit(0xf2c08708)
+    ctx.emit(ADRP(16, ctx.here(), ctx.state))
+    for word in (0xf9410211, 0xb4000051, 0xaa1103e8):
+        ctx.emit(word)
+    ctx.emit(B(ctx.here(), site + 4))
+    ctx.put(site, [B(site, start)], 'experimental screen size: use the requested packed width and height, or the original size')
+    site = 0x17c376c
+    ctx.site(site, '5f010071')
+    start = ctx.here()
+    ctx.emit(ADRP(16, ctx.here(), ctx.state))
+    for word in (0xb9420211, 0x34000051, 0x2a1f03ea, 0x7100015f):
+        ctx.emit(word)
+    ctx.emit(B(ctx.here(), site + 4))
+    ctx.put(site, [B(site, start)], 'experimental screen size: select the configured size for the swap chain when enabled')
+    site = 0x189ea34
+    ctx.site(site, '684e41bd')
+    start = ctx.here()
+    ctx.emit(0xbd414e68)
+    ctx.emit(ADRP(16, ctx.here(), ctx.state))
+    for word in (0xb9420a11, 0x34000131, 0x1e260111, 0x5291c730, 0x72a7fc70, 0x6b10023f, 0x54000081):
+        ctx.emit(word)
+    ctx.emit(ADRP(16, ctx.here(), ctx.state))
+    for word in (0xb9420a11, 0x1e270228):
+        ctx.emit(word)
+    ctx.emit(B(ctx.here(), site + 4))
+    ctx.put(site, [B(site, start)], 'experimental screen shape: adjust 16:9 perspective projections to the requested aspect')
+
+CAPABILITIES = {'c3cf52bf2b05d7310884971b50bcccb8': ('SCREEN_SIZE',)}
 
 def matched_frame_step(ctx):
     """Any build whose KIDS frame task, nnMain, scene update and frame-rate block writer match: all four or nothing, as a part alone runs the game at the wrong speed (the
@@ -145,6 +176,8 @@ MATCH_FRAME_STEP = {'main': [
 # How general each patch is and could be (dm/tools/docs_patches.py "Binding", listed in docs/agents/game-patches.md): what, its binding now, the loosest it could have (goal),
 # purpose, why; blocked or kept: why the gap stays open (cannot close yet, or left open on purpose); checked: what was checked on game files (else a judgement)
 BINDING = [
+    {'what': 'experimental screen size on 1.3.0', 'now': 'build', 'goal': 'unreviewed', 'purpose': 'rendering',
+     'why': 'the display size instruction was checked in the rewritten 1.3.0 main; runtime picture and HUD behaviour remain unverified'},
     {'what': '60 fps frame step: the KIDS frame task, frame-rate block and event cutscene counters (any build but 1.3.0)', 'now': 'game', 'goal': 'game', 'purpose': 'frame rate',
      'why': "the game's own frame code, found by its four functions' fingerprints, the KTGL device global and the frame-rate block read from their code. No KTGL sibling shares "
             'it: the KIDS task has no exact match in Three Hopes, Taiko Risshiden V DX, Three Houses, Hyrule Warriors: Definitive Edition or Age of Imprisonment',
