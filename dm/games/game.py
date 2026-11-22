@@ -251,6 +251,23 @@ def header_one(g):
         except ValueError:
             valid_map = False
         if not valid_map: sys.exit(f'{g.id}: wide_map requires wide_ui, vertex and fragment keys, and texture width and height')
+    wide_world_map = g.words('wide_world_map', '')
+    if wide_world_map:
+        try:
+            valid_world_map = bool(wide_map) and len(wide_world_map) >= 3 and all(0 < int(value, 0) <= 8192 for value in wide_world_map)
+        except ValueError:
+            valid_world_map = False
+        if not valid_world_map: sys.exit(f'{g.id}: wide_world_map requires wide_map, texture width, height and icon sizes')
+    wide_preview = g.words('wide_preview', '')
+    if wide_preview:
+        try:
+            valid_preview = (bool(wide_ui) and len(wide_preview) == 5 and
+                             all(re.fullmatch(r'[0-9a-f]{16}', key) for key in wide_preview[:2]) and
+                             all(0 < int(value, 0) <= 8192 for value in wide_preview[2:4]) and
+                             0 <= int(wide_preview[4], 0) <= 0xffffffffffffffff)
+        except ValueError:
+            valid_preview = False
+        if not valid_preview: sys.exit(f'{g.id}: wide_preview requires wide_ui, shader keys, texture dimensions and blend state')
     api = g.get('device_api', '55.15')   # the NVN API major.minor version nvnDeviceGetInteger reports (hle_nvn.c)
     if not re.fullmatch(r'\d+\.\d+', api): sys.exit(f'{g.id}: device_api must be major.minor: {api}')
     src = f'dm/games/{g.id}' if g.dir.parent == HERE else str(g.dir)
@@ -305,6 +322,11 @@ def header_one(g):
                 f'#define DM_GAME_WIDE_UI_OVERLAY_VERTEX {q(wide_ui[3])}', f'#define DM_GAME_WIDE_UI_OVERLAY_FRAGMENT {q(wide_ui[7])}'] if wide_ui else []),
             *([f'#define DM_GAME_WIDE_MAP_VERTEX {q(wide_map[0])}', f'#define DM_GAME_WIDE_MAP_FRAGMENT {q(wide_map[1])}',
                 f'#define DM_GAME_WIDE_MAP_TEXTURE_WIDTH {int(wide_map[2], 0)}', f'#define DM_GAME_WIDE_MAP_TEXTURE_HEIGHT {int(wide_map[3], 0)}'] if wide_map else []),
+            *([f'#define DM_GAME_WIDE_WORLD_MAP_WIDTH {int(wide_world_map[0], 0)}', f'#define DM_GAME_WIDE_WORLD_MAP_HEIGHT {int(wide_world_map[1], 0)}',
+                f'#define DM_GAME_WIDE_WORLD_MAP_SIZES {", ".join(str(int(value, 0)) for value in wide_world_map[2:])}'] if wide_world_map else []),
+            *([f'#define DM_GAME_WIDE_PREVIEW_VERTEX {q(wide_preview[0])}', f'#define DM_GAME_WIDE_PREVIEW_FRAGMENT {q(wide_preview[1])}',
+                f'#define DM_GAME_WIDE_PREVIEW_WIDTH {int(wide_preview[2], 0)}', f'#define DM_GAME_WIDE_PREVIEW_HEIGHT {int(wide_preview[3], 0)}',
+                f'#define DM_GAME_WIDE_PREVIEW_BLEND {int(wide_preview[4], 0):#x}ULL'] if wide_preview else []),
             *([f'#define DM_GAME_WIDE_GRADIENT_VS {q(gradient[0])}', f'#define DM_GAME_WIDE_GRADIENT_FS {q(gradient[1])}',
                 f'#define DM_GAME_WIDE_GRADIENT_WIDTH {int(gradient[2], 0)}', f'#define DM_GAME_WIDE_GRADIENT_HEIGHT {int(gradient[3], 0)}',
                 f'#define DM_GAME_WIDE_GRADIENT_OFFSET {int(gradient[4], 0)}', f'#define DM_GAME_WIDE_GRADIENT_CANVAS {int(gradient[5], 0)}'] if gradient else []),

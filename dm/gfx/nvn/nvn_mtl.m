@@ -16151,6 +16151,55 @@ static double DmWideUiScale(NvProg *program, const p_draw_idx *draw, NSUInteger 
 }
 #ifdef DM_GAME_WIDE_MAP_VERTEX
 static double DmWideMapOffset(NvProg *program, const p_draw_idx *draw, NSUInteger width, NSUInteger height) {
+#ifdef DM_GAME_WIDE_WORLD_MAP_WIDTH
+    if (program && program->sh[0] && program->sh[1] &&
+        !strncmp(program->sh[0]->key, DM_GAME_WIDE_MAP_VERTEX, 16) &&
+        !strncmp(program->sh[1]->key, DM_GAME_WIDE_MAP_FRAGMENT, 16) && DmWideUiSelected(width, height)) {
+        int textureId = (int)(S.tex[1][0] & 0xfffff), worldAtlas = 0;
+        os_unfair_lock_lock(&g_rmu);
+        if (textureId > 0 && textureId < g_ntreg && g_treg[textureId].ok)
+            worldAtlas = g_treg[textureId].t.d.width == DM_GAME_WIDE_WORLD_MAP_WIDTH && g_treg[textureId].t.d.height == DM_GAME_WIDE_WORLD_MAP_HEIGHT;
+        os_unfair_lock_unlock(&g_rmu);
+        if (worldAtlas && draw && draw->count == 6 && draw->itype == 1 && !draw->ind && !draw->mdi_cnt &&
+            draw->instances == 1 && draw->prim == 4 && !draw->base_vertex && !S.restart.on &&
+            S.nattr >= 3 && S.attr[0].fmt == 0x22 && S.attr[0].stream == 0 && S.attr[0].offset == 0 &&
+            S.attr[2].fmt == 0x16 && S.attr[2].stream == 0 && S.attr[2].offset == 16 &&
+            S.stream[0].stride == 24 && !S.stream[0].divisor && S.vbuf[0].size == 96 && S.vbuf[0].address &&
+            (!S.has_vp || (S.vp[0][0] == 0 && S.vp[0][1] == 0 && S.vp[0][2] == width && S.vp[0][3] == height)) &&
+            (!R.has_sc || (R.sc.x == 0 && R.sc.y == 0 && R.sc.w == width && R.sc.h == height)) &&
+            draw->ibuf && draw->ibuf <= UINT64_MAX - 12 && nvn_host_readable(draw->ibuf, 12) &&
+            !nvn_sparse_alias(draw->ibuf, draw->ibuf + 12) && !geo_cpu_hazard(draw->ibuf, 12) &&
+            !(g_nubd && ubd_hits(draw->ibuf, draw->ibuf + 12)) &&
+            S.vbuf[0].address <= UINT64_MAX - 96 && !g_pend_over &&
+            !nvn_sparse_alias(S.vbuf[0].address, S.vbuf[0].address + 96) &&
+            !geo_cpu_hazard(S.vbuf[0].address, 96) &&
+            !(g_nubd && ubd_hits(S.vbuf[0].address, S.vbuf[0].address + 96)) &&
+            nvn_host_readable(S.vbuf[0].address, 96)) {
+            const p_bind_buf *uniform = &S.ubo[0][0];
+            void *buffer; uint64_t offset, gpu;
+            if (!uniform->addr || uniform->size < 16 || uniform->addr > UINT64_MAX - 16 ||
+                nvn_sparse_alias(uniform->addr, uniform->addr + 16) || geo_cpu_hazard(uniform->addr, 16) ||
+                (g_nubd && ubd_hits(uniform->addr, uniform->addr + 16)) ||
+                !mtl_gpu_addr(uniform->addr, uniform->size, &buffer, &offset, &gpu)) return 0;
+            const void *contents = [(__bridge id<MTLBuffer>)buffer contents];
+            if (!contents) return 0;
+            float projection[4]; memcpy(projection, (const char *)contents + offset, sizeof projection);
+            if (!DmWideMapProjection(projection, (float)width, (float)height)) return 0;
+            uint16_t indices[6]; memcpy(indices, (const void *)(uintptr_t)draw->ibuf, sizeof indices);
+            for (unsigned index = 0; index < 6; index++) if (indices[index] >= 4) return 0;
+            float positions[4][2], uvs[4][2];
+            const char *vertex = (const char *)(uintptr_t)S.vbuf[0].address;
+            for (unsigned index = 0; index < 4; index++) {
+                memcpy(positions[index], vertex + index * 24, sizeof positions[index]);
+                memcpy(uvs[index], vertex + index * 24 + 16, sizeof uvs[index]);
+            }
+            const float SIZES[] = {DM_GAME_WIDE_WORLD_MAP_SIZES};
+            if (DmWideWorldIcon(positions, uvs, DM_GAME_WIDE_WORLD_MAP_WIDTH, DM_GAME_WIDE_WORLD_MAP_HEIGHT,
+                                SIZES, sizeof SIZES / sizeof SIZES[0]))
+                return DmWideMapMargin((uint32_t)width, (uint32_t)height, DM_GAME_WIDE_UI_WIDTH, DM_GAME_WIDE_UI_HEIGHT);
+        }
+    }
+#endif
     if (!program || !program->sh[0] || !program->sh[1] ||
         strncmp(program->sh[0]->key, DM_GAME_WIDE_MAP_VERTEX, 16) ||
         strncmp(program->sh[1]->key, DM_GAME_WIDE_MAP_FRAGMENT, 16) ||
@@ -16343,6 +16392,22 @@ static void draw_(const p_draw *dw, const p_draw_idx *di) {
     double aspectScale = 1, effectiveAspect = dm_game_aspect();
 #ifdef DM_GAME_WIDE_UI_BUILD
     aspectScale = DmWideUiScale(pr, di, tw, th);
+#ifdef DM_GAME_WIDE_PREVIEW_VERTEX
+    if (DmWideUiSelected(tw, th) && pr && pr->sh[0] && pr->sh[1] && di && di->prim == 4 &&
+        di->count == 6 && di->instances == 1 && !di->ind && !di->mdi_cnt &&
+        (!S.has_vp || (S.vp[0][0] == 0 && S.vp[0][1] == 0 && S.vp[0][2] == tw && S.vp[0][3] == th)) &&
+        (!R.has_sc || (R.sc.x == 0 && R.sc.y == 0 && R.sc.w == tw && R.sc.h == th)) &&
+        !strncmp(pr->sh[0]->key, DM_GAME_WIDE_PREVIEW_VERTEX, 16) && !strncmp(pr->sh[1]->key, DM_GAME_WIDE_PREVIEW_FRAGMENT, 16)) {
+        int textureId = (int)(S.tex[1][0] & 0xfffff), previewTexture = 0;
+        os_unfair_lock_lock(&g_rmu);
+        if (textureId > 0 && textureId < g_ntreg && g_treg[textureId].ok)
+            previewTexture = g_treg[textureId].t.d.width == DM_GAME_WIDE_PREVIEW_WIDTH && g_treg[textureId].t.d.height == DM_GAME_WIDE_PREVIEW_HEIGHT;
+        os_unfair_lock_unlock(&g_rmu);
+        uint64_t blend; memcpy(&blend, &S.blend[0], sizeof blend);
+        if (previewTexture && blend == DM_GAME_WIDE_PREVIEW_BLEND)
+            aspectScale = DmWidePreviewScale((uint32_t)tw, (uint32_t)th, DM_GAME_WIDE_UI_WIDTH, DM_GAME_WIDE_UI_HEIGHT);
+    }
+    #endif
 #endif
     if (effectiveAspect > 16.0 / 9.0 && R.rt.n > 0 && R.rt.color[0] && R.rt.color[0]->serial == g_aspect_canvas &&
         (dw ? dw->count : di ? di->count : 0) == 6) {

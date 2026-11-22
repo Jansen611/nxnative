@@ -80,6 +80,28 @@ class WideUI(unittest.TestCase):
             self.assertNotEqual(result, 0)
             self.assertIn('wide_map requires wide_ui', output)
 
+    def test_world_map_rule(self):
+        wide = 'wide_ui\t' + ' '.join([self.BUILD, '1920', '1080', *self.KEYS]) + '\n'
+        map_rule = 'wide_map\t0123456789abcdef fedcba9876543210 1024 512\n'
+        world_rule = 'wide_world_map\t2048 512 64 68 92\n'
+        self.assertEqual(header(self.REGISTERED + wide + map_rule + world_rule), (0, ''))
+        for rows in (self.REGISTERED + wide + world_rule, self.REGISTERED + wide + map_rule + 'wide_world_map\t2048 512\n',
+                     self.REGISTERED + wide + map_rule + 'wide_world_map\t2048 512 0\n'):
+            result, output = header(rows)
+            self.assertNotEqual(result, 0)
+            self.assertIn('wide_world_map requires wide_map', output)
+
+    def test_preview_rule(self):
+        wide = 'wide_ui\t' + ' '.join([self.BUILD, '1920', '1080', *self.KEYS]) + '\n'
+        rule = 'wide_preview\t0123456789abcdef fedcba9876543210 480 270 0x4860a1828\n'
+        self.assertEqual(header(self.REGISTERED + wide + rule), (0, ''))
+        for rows in (self.REGISTERED + rule, self.REGISTERED + wide + rule.replace('480', '0'),
+                     self.REGISTERED + wide + rule.replace('fedcba9876543210', 'invalid'),
+                     self.REGISTERED + wide + rule.replace('0x4860a1828', '-1')):
+            result, output = header(rows)
+            self.assertNotEqual(result, 0)
+            self.assertIn('wide_preview requires wide_ui', output)
+
 
 
 MAP = ('# kind: evidence  Test shaders\n# column 5 records where each key first appears\npackage\tindex\tstage\tdm_ctl_sha16\tsource\n'

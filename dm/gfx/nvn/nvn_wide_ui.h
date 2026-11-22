@@ -47,6 +47,31 @@ static inline double DmWideMapMargin(uint32_t width, uint32_t height, uint32_t o
     return (width - (double)height * originalWidth / originalHeight) / 2;
 }
 
+// Align the observed wide-to-fixed-to-wide preview map with the source map.
+static inline double DmWidePreviewScale(uint32_t width, uint32_t height, uint32_t originalWidth, uint32_t originalHeight) {
+    if (!width || !height || !originalWidth || !originalHeight ||
+        (uint64_t)width * originalHeight <= (uint64_t)height * originalWidth) return 1;
+    double ratio = (double)originalWidth * height / ((double)originalHeight * width);
+    return ratio * ratio;
+}
+
+// Recognise the observed rectangular world-map icon geometry and atlas extents.
+static inline int DmWideWorldIcon(const float positions[4][2], const float uvs[4][2], float atlasWidth, float atlasHeight,
+                                  const float *sizes, unsigned count) {
+    float width = fabsf(positions[2][0] - positions[0][0]);
+    float height = fabsf(positions[2][1] - positions[0][1]);
+    float uvWidth = fabsf(uvs[2][0] - uvs[0][0]) * atlasWidth;
+    float uvHeight = fabsf(uvs[2][1] - uvs[0][1]) * atlasHeight;
+        int matchingSize = 0;
+        for (unsigned index = 0; index < count; index++) if (fabsf(uvWidth - sizes[index]) < 0.01f) matchingSize = 1;
+        if (!(width > 0 && isfinite(width) && fabsf(width - height) < 0.01f &&
+            fabsf(uvWidth - uvHeight) < 0.01f && matchingSize)) return 0;
+    return positions[0][0] == positions[1][0] && positions[1][1] == positions[2][1] &&
+        positions[2][0] == positions[3][0] && positions[3][1] == positions[0][1] &&
+        uvs[0][0] == uvs[1][0] && uvs[1][1] == uvs[2][1] &&
+        uvs[2][0] == uvs[3][0] && uvs[3][1] == uvs[0][1];
+}
+
 static inline int DmWideUiFullOverlay(const float *values, const DmWideUiVertex *vertices, float width, float height) {
     const float IDENTITY[12] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0};
     unsigned triangles[2] = {0, 0};
