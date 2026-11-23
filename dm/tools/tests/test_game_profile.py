@@ -91,6 +91,18 @@ class WideUI(unittest.TestCase):
             self.assertNotEqual(result, 0)
             self.assertIn('wide_world_map requires wide_map', output)
 
+    def test_map_mask_rule(self):
+        wide = 'wide_ui\t' + ' '.join([self.BUILD, '1920', '1080', *self.KEYS]) + '\n'
+        map_rule = 'wide_map\t0123456789abcdef fedcba9876543210 1024 512\n'
+        mask_rule = 'wide_map_mask\t0123456789abcdef\n'
+        self.assertEqual(header(self.REGISTERED + wide + map_rule + mask_rule), (0, ''))
+        for rows in (self.REGISTERED + wide + mask_rule,
+                     self.REGISTERED + wide + map_rule + 'wide_map_mask\tinvalid\n',
+                     self.REGISTERED + wide + map_rule + 'wide_map_mask\t0123456789abcdef fedcba9876543210\n'):
+            result, output = header(rows)
+            self.assertNotEqual(result, 0)
+            self.assertIn('wide_map_mask requires wide_map', output)
+
     def test_preview_rule(self):
         wide = 'wide_ui\t' + ' '.join([self.BUILD, '1920', '1080', *self.KEYS]) + '\n'
         rule = 'wide_preview\t0123456789abcdef fedcba9876543210 480 270 0x4860a1828\n'

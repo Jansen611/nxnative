@@ -47,6 +47,22 @@ static inline double DmWideMapMargin(uint32_t width, uint32_t height, uint32_t o
     return (width - (double)height * originalWidth / originalHeight) / 2;
 }
 
+static inline int DmWideMapMaskQuad(const float positions[4][2], const uint16_t indices[6], float width, float height) {
+    if (width <= 0 || height <= 0) return 0;
+    unsigned triangles[2] = {0, 0};
+    for (unsigned index = 0; index < 6; index++) {
+        if (indices[index] >= 4) return 0;
+        const float *position = positions[indices[index]];
+        if ((position[0] != 0 && position[0] != width) || (position[1] != 0 && position[1] != height)) return 0;
+        unsigned corner = (position[0] == width ? 1u : 0u) | (position[1] == height ? 2u : 0u);
+        unsigned bit = 1u << corner;
+        if (triangles[index / 3] & bit) return 0;
+        triangles[index / 3] |= bit;
+    }
+    unsigned shared = triangles[0] & triangles[1];
+    return (triangles[0] | triangles[1]) == 15 && (shared == 9 || shared == 6);
+}
+
 // Align the observed wide-to-fixed-to-wide preview map with the source map.
 static inline double DmWidePreviewScale(uint32_t width, uint32_t height, uint32_t originalWidth, uint32_t originalHeight) {
     if (!width || !height || !originalWidth || !originalHeight ||

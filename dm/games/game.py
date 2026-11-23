@@ -251,6 +251,9 @@ def header_one(g):
         except ValueError:
             valid_map = False
         if not valid_map: sys.exit(f'{g.id}: wide_map requires wide_ui, vertex and fragment keys, and texture width and height')
+    wide_map_mask = g.words('wide_map_mask', '')
+    if wide_map_mask and (not wide_map or len(wide_map_mask) != 1 or not re.fullmatch(r'[0-9a-f]{16}', wide_map_mask[0])):
+        sys.exit(f'{g.id}: wide_map_mask requires wide_map and a fragment key')
     wide_world_map = g.words('wide_world_map', '')
     if wide_world_map:
         try:
@@ -322,6 +325,7 @@ def header_one(g):
                 f'#define DM_GAME_WIDE_UI_OVERLAY_VERTEX {q(wide_ui[3])}', f'#define DM_GAME_WIDE_UI_OVERLAY_FRAGMENT {q(wide_ui[7])}'] if wide_ui else []),
             *([f'#define DM_GAME_WIDE_MAP_VERTEX {q(wide_map[0])}', f'#define DM_GAME_WIDE_MAP_FRAGMENT {q(wide_map[1])}',
                 f'#define DM_GAME_WIDE_MAP_TEXTURE_WIDTH {int(wide_map[2], 0)}', f'#define DM_GAME_WIDE_MAP_TEXTURE_HEIGHT {int(wide_map[3], 0)}'] if wide_map else []),
+            *([f'#define DM_GAME_WIDE_MAP_MASK_FRAGMENT {q(wide_map_mask[0])}'] if wide_map_mask else []),
             *([f'#define DM_GAME_WIDE_WORLD_MAP_WIDTH {int(wide_world_map[0], 0)}', f'#define DM_GAME_WIDE_WORLD_MAP_HEIGHT {int(wide_world_map[1], 0)}',
                 f'#define DM_GAME_WIDE_WORLD_MAP_SIZES {", ".join(str(int(value, 0)) for value in wide_world_map[2:])}'] if wide_world_map else []),
             *([f'#define DM_GAME_WIDE_PREVIEW_VERTEX {q(wide_preview[0])}', f'#define DM_GAME_WIDE_PREVIEW_FRAGMENT {q(wide_preview[1])}',

@@ -27,6 +27,15 @@ int main(void) {
     Check(DmWideMapMargin(2160, 1080, 1920, 1080) == 120, "18:9 map margin");
     Check(DmWideMapMargin(1920, 1080, 1920, 1080) == 0, "16:9 map unchanged");
     Check(DmWideMapMargin(1440, 1080, 1920, 1080) == 0, "narrow output unchanged");
+    float maskPositions[4][2] = {{0, 0}, {0, 1080}, {1920, 1080}, {1920, 0}};
+    uint16_t maskIndices[6] = {0, 1, 2, 0, 2, 3};
+    Check(DmWideMapMaskQuad(maskPositions, maskIndices, 1920, 1080), "full map mask");
+    maskPositions[2][0] = 1900;
+    Check(!DmWideMapMaskQuad(maskPositions, maskIndices, 1920, 1080), "partial map mask refused");
+    maskPositions[2][0] = 1920; maskIndices[5] = 2;
+    Check(!DmWideMapMaskQuad(maskPositions, maskIndices, 1920, 1080), "degenerate mask refused");
+    maskIndices[5] = 4;
+    Check(!DmWideMapMaskQuad(maskPositions, maskIndices, 1920, 1080), "invalid mask index refused");
     Check(fabs(DmWidePreviewScale(2336, 1080, 1920, 1080) - (1920.0 / 2336) * (1920.0 / 2336)) < 0.000001, "19.5:9 preview alignment");
     Check(fabs(DmWidePreviewScale(2160, 1080, 1920, 1080) - (1920.0 / 2160) * (1920.0 / 2160)) < 0.000001, "18:9 preview alignment");
     Check(DmWidePreviewScale(1920, 1080, 1920, 1080) == 1, "16:9 preview unchanged");
