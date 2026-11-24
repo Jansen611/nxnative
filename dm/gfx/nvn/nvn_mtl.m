@@ -16193,26 +16193,30 @@ static double DmWideMapOffset(NvProg *program, const p_draw_idx *draw, NSUIntege
     if (program && program->sh[0] && program->sh[1] &&
         !strncmp(program->sh[0]->key, DM_GAME_WIDE_MAP_VERTEX, 16) &&
         !strncmp(program->sh[1]->key, DM_GAME_WIDE_MAP_FRAGMENT, 16) && DmWideUiSelected(width, height)) {
-        int textureId = (int)(S.tex[1][0] & 0xfffff), worldAtlas = 0;
+        int textureId = (int)(S.tex[1][0] & 0xfffff), worldAtlas = 0, worldPulse = 0;
         os_unfair_lock_lock(&g_rmu);
-        if (textureId > 0 && textureId < g_ntreg && g_treg[textureId].ok)
+        if (textureId > 0 && textureId < g_ntreg && g_treg[textureId].ok) {
             worldAtlas = g_treg[textureId].t.d.width == DM_GAME_WIDE_WORLD_MAP_WIDTH && g_treg[textureId].t.d.height == DM_GAME_WIDE_WORLD_MAP_HEIGHT;
+#ifdef DM_GAME_WIDE_WORLD_PULSE_WIDTH
+            worldPulse = g_treg[textureId].t.d.width == DM_GAME_WIDE_WORLD_PULSE_WIDTH && g_treg[textureId].t.d.height == DM_GAME_WIDE_WORLD_PULSE_HEIGHT;
+#endif
+        }
         os_unfair_lock_unlock(&g_rmu);
-        if (worldAtlas && draw && draw->count == 6 && draw->itype == 1 && !draw->ind && !draw->mdi_cnt &&
+        if ((worldAtlas || worldPulse) && draw && (draw->count == 6 || draw->count == 12) && draw->itype == 1 && !draw->ind && !draw->mdi_cnt &&
             draw->instances == 1 && draw->prim == 4 && !draw->base_vertex && !S.restart.on &&
             S.nattr >= 3 && S.attr[0].fmt == 0x22 && S.attr[0].stream == 0 && S.attr[0].offset == 0 &&
             S.attr[2].fmt == 0x16 && S.attr[2].stream == 0 && S.attr[2].offset == 16 &&
-            S.stream[0].stride == 24 && !S.stream[0].divisor && S.vbuf[0].size == 96 && S.vbuf[0].address &&
+            S.stream[0].stride == 24 && !S.stream[0].divisor && S.vbuf[0].size == (uint64_t)draw->count * 16 && S.vbuf[0].address &&
             (!S.has_vp || (S.vp[0][0] == 0 && S.vp[0][1] == 0 && S.vp[0][2] == width && S.vp[0][3] == height)) &&
             (!R.has_sc || (R.sc.x == 0 && R.sc.y == 0 && R.sc.w == width && R.sc.h == height)) &&
-            draw->ibuf && draw->ibuf <= UINT64_MAX - 12 && nvn_host_readable(draw->ibuf, 12) &&
-            !nvn_sparse_alias(draw->ibuf, draw->ibuf + 12) && !geo_cpu_hazard(draw->ibuf, 12) &&
-            !(g_nubd && ubd_hits(draw->ibuf, draw->ibuf + 12)) &&
-            S.vbuf[0].address <= UINT64_MAX - 96 && !g_pend_over &&
-            !nvn_sparse_alias(S.vbuf[0].address, S.vbuf[0].address + 96) &&
-            !geo_cpu_hazard(S.vbuf[0].address, 96) &&
-            !(g_nubd && ubd_hits(S.vbuf[0].address, S.vbuf[0].address + 96)) &&
-            nvn_host_readable(S.vbuf[0].address, 96)) {
+            draw->ibuf && draw->ibuf <= UINT64_MAX - (uint64_t)draw->count * 2 && nvn_host_readable(draw->ibuf, draw->count * 2) &&
+            !nvn_sparse_alias(draw->ibuf, draw->ibuf + draw->count * 2) && !geo_cpu_hazard(draw->ibuf, draw->count * 2) &&
+            !(g_nubd && ubd_hits(draw->ibuf, draw->ibuf + draw->count * 2)) &&
+            S.vbuf[0].address <= UINT64_MAX - S.vbuf[0].size && !g_pend_over &&
+            !nvn_sparse_alias(S.vbuf[0].address, S.vbuf[0].address + S.vbuf[0].size) &&
+            !geo_cpu_hazard(S.vbuf[0].address, S.vbuf[0].size) &&
+            !(g_nubd && ubd_hits(S.vbuf[0].address, S.vbuf[0].address + S.vbuf[0].size)) &&
+            nvn_host_readable(S.vbuf[0].address, S.vbuf[0].size)) {
             const p_bind_buf *uniform = &S.ubo[0][0];
             void *buffer; uint64_t offset, gpu;
             if (!uniform->addr || uniform->size < 16 || uniform->addr > UINT64_MAX - 16 ||
@@ -16223,17 +16227,24 @@ static double DmWideMapOffset(NvProg *program, const p_draw_idx *draw, NSUIntege
             if (!contents) return 0;
             float projection[4]; memcpy(projection, (const char *)contents + offset, sizeof projection);
             if (!DmWideMapProjection(projection, (float)width, (float)height)) return 0;
-            uint16_t indices[6]; memcpy(indices, (const void *)(uintptr_t)draw->ibuf, sizeof indices);
-            for (unsigned index = 0; index < 6; index++) if (indices[index] >= 4) return 0;
-            float positions[4][2], uvs[4][2];
+            uint16_t indices[12]; memcpy(indices, (const void *)(uintptr_t)draw->ibuf, draw->count * 2);
+            float positions[2][4][2], uvs[2][4][2];
             const char *vertex = (const char *)(uintptr_t)S.vbuf[0].address;
-            for (unsigned index = 0; index < 4; index++) {
-                memcpy(positions[index], vertex + index * 24, sizeof positions[index]);
-                memcpy(uvs[index], vertex + index * 24 + 16, sizeof uvs[index]);
+            unsigned quadCount = draw->count / 6;
+            for (unsigned index = 0; index < quadCount * 4; index++) {
+                memcpy(positions[index / 4][index % 4], vertex + index * 24, sizeof positions[0][0]);
+                memcpy(uvs[index / 4][index % 4], vertex + index * 24 + 16, sizeof uvs[0][0]);
             }
             const float SIZES[] = {DM_GAME_WIDE_WORLD_MAP_SIZES};
-            if (DmWideWorldIcon(positions, uvs, DM_GAME_WIDE_WORLD_MAP_WIDTH, DM_GAME_WIDE_WORLD_MAP_HEIGHT,
-                                SIZES, sizeof SIZES / sizeof SIZES[0]))
+            int matches = worldAtlas && DmWideWorldIconBatch(positions, uvs, indices, quadCount, DM_GAME_WIDE_WORLD_MAP_WIDTH,
+                                                             DM_GAME_WIDE_WORLD_MAP_HEIGHT, SIZES, sizeof SIZES / sizeof SIZES[0]);
+#ifdef DM_GAME_WIDE_WORLD_PULSE_WIDTH
+            uint64_t blend; memcpy(&blend, &S.blend[0], sizeof blend);
+            if (worldPulse && quadCount == 2 && S.color.blend_en == 1 && blend == DM_GAME_WIDE_WORLD_PULSE_BLEND &&
+                DmWideWorldPulse(positions, uvs, indices, DM_GAME_WIDE_WORLD_PULSE_WIDTH,
+                                 DM_GAME_WIDE_WORLD_PULSE_HEIGHT, DM_GAME_WIDE_WORLD_PULSE_EXTENT)) matches = 1;
+#endif
+            if (matches)
                 return DmWideMapMargin((uint32_t)width, (uint32_t)height, DM_GAME_WIDE_UI_WIDTH, DM_GAME_WIDE_UI_HEIGHT);
         }
     }

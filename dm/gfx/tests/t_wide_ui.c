@@ -49,6 +49,30 @@ int main(void) {
     Check(!DmWideWorldIcon(iconPositions, iconUvs, 2048, 512, ICON_SIZES, 3), "wrong icon UV refused");
     iconUvs[2][0] = 130.0f / 2048; iconPositions[1][0] += 1;
     Check(!DmWideWorldIcon(iconPositions, iconUvs, 2048, 512, ICON_SIZES, 3), "non-rectangular icon refused");
+    iconPositions[1][0] -= 1;
+    float batchPositions[2][4][2], batchUvs[2][4][2];
+    memcpy(batchPositions[0], iconPositions, sizeof iconPositions); memcpy(batchPositions[1], iconPositions, sizeof iconPositions);
+    memcpy(batchUvs[0], iconUvs, sizeof iconUvs); memcpy(batchUvs[1], iconUvs, sizeof iconUvs);
+    uint16_t batchIndices[12] = {0, 1, 2, 0, 2, 3, 4, 5, 6, 4, 6, 7};
+    Check(DmWideWorldIconBatch(batchPositions, batchUvs, batchIndices, 1, 2048, 512, ICON_SIZES, 3), "single world-map icon batch");
+    Check(DmWideWorldIconBatch(batchPositions, batchUvs, batchIndices, 2, 2048, 512, ICON_SIZES, 3), "two world-map icons batched");
+    batchUvs[1][2][0] += 1.0f / 2048;
+    Check(!DmWideWorldIconBatch(batchPositions, batchUvs, batchIndices, 2, 2048, 512, ICON_SIZES, 3), "mixed batch refused");
+    batchUvs[1][2][0] -= 1.0f / 2048; batchIndices[11] = 6;
+    Check(!DmWideWorldIconBatch(batchPositions, batchUvs, batchIndices, 2, 2048, 512, ICON_SIZES, 3), "degenerate icon batch refused");
+    batchIndices[11] = 3;
+    Check(!DmWideWorldIconBatch(batchPositions, batchUvs, batchIndices, 2, 2048, 512, ICON_SIZES, 3), "cross-quad index refused");
+    batchIndices[11] = 7;
+    float pulseUvs[2][4][2] = {{{0, 0}, {0, 60.0f / 64}, {60.0f / 64, 60.0f / 64}, {60.0f / 64, 0}},
+                                {{0, 0}, {0, 60.0f / 64}, {60.0f / 64, 60.0f / 64}, {60.0f / 64, 0}}};
+    float pulsePositions[2][4][2] = {{{932.031f, 137.659f}, {862.460f, 263.169f}, {987.969f, 332.740f}, {1057.540f, 207.230f}},
+                                     {{862.460f, 207.230f}, {932.031f, 332.740f}, {1057.540f, 263.169f}, {987.969f, 137.659f}}};
+    Check(DmWideWorldPulse(pulsePositions, pulseUvs, batchIndices, 64, 64, 60), "rotating world-map pulse");
+    for (unsigned index = 0; index < 4; index++) pulsePositions[1][index][0] += 1;
+    Check(!DmWideWorldPulse(pulsePositions, pulseUvs, batchIndices, 64, 64, 60), "different pulse geometry refused");
+    for (unsigned index = 0; index < 4; index++) pulsePositions[1][index][0] -= 1;
+    pulseUvs[1][0][0] += 1.0f / 64;
+    Check(!DmWideWorldPulse(pulsePositions, pulseUvs, batchIndices, 64, 64, 60), "different pulse UV refused");
     float values[36] = {0};
     values[8] = 2.0f / 1920; values[13] = 2.0f / 1080; values[23] = 1;
     values[24] = values[29] = values[34] = 1;

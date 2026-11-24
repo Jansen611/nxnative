@@ -261,6 +261,16 @@ def header_one(g):
         except ValueError:
             valid_world_map = False
         if not valid_world_map: sys.exit(f'{g.id}: wide_world_map requires wide_map, texture width, height and icon sizes')
+    wide_world_pulse = g.words('wide_world_pulse', '')
+    if wide_world_pulse:
+        try:
+            valid_world_pulse = (bool(wide_world_map) and len(wide_world_pulse) == 4 and
+                                 all(0 < int(value, 0) <= 8192 for value in wide_world_pulse[:3]) and
+                                 int(wide_world_pulse[2], 0) <= min(int(wide_world_pulse[0], 0), int(wide_world_pulse[1], 0)) and
+                                 0 <= int(wide_world_pulse[3], 0) <= 0xffffffffffffffff)
+        except ValueError:
+            valid_world_pulse = False
+        if not valid_world_pulse: sys.exit(f'{g.id}: wide_world_pulse requires wide_world_map, texture dimensions, UV extent and blend state')
     wide_preview = g.words('wide_preview', '')
     if wide_preview:
         try:
@@ -326,8 +336,10 @@ def header_one(g):
             *([f'#define DM_GAME_WIDE_MAP_VERTEX {q(wide_map[0])}', f'#define DM_GAME_WIDE_MAP_FRAGMENT {q(wide_map[1])}',
                 f'#define DM_GAME_WIDE_MAP_TEXTURE_WIDTH {int(wide_map[2], 0)}', f'#define DM_GAME_WIDE_MAP_TEXTURE_HEIGHT {int(wide_map[3], 0)}'] if wide_map else []),
             *([f'#define DM_GAME_WIDE_MAP_MASK_FRAGMENT {q(wide_map_mask[0])}'] if wide_map_mask else []),
-            *([f'#define DM_GAME_WIDE_WORLD_MAP_WIDTH {int(wide_world_map[0], 0)}', f'#define DM_GAME_WIDE_WORLD_MAP_HEIGHT {int(wide_world_map[1], 0)}',
-                f'#define DM_GAME_WIDE_WORLD_MAP_SIZES {", ".join(str(int(value, 0)) for value in wide_world_map[2:])}'] if wide_world_map else []),
+             *([f'#define DM_GAME_WIDE_WORLD_MAP_WIDTH {int(wide_world_map[0], 0)}', f'#define DM_GAME_WIDE_WORLD_MAP_HEIGHT {int(wide_world_map[1], 0)}',
+                 f'#define DM_GAME_WIDE_WORLD_MAP_SIZES {", ".join(str(int(value, 0)) for value in wide_world_map[2:])}'] if wide_world_map else []),
+             *([f'#define DM_GAME_WIDE_WORLD_PULSE_WIDTH {int(wide_world_pulse[0], 0)}', f'#define DM_GAME_WIDE_WORLD_PULSE_HEIGHT {int(wide_world_pulse[1], 0)}',
+                 f'#define DM_GAME_WIDE_WORLD_PULSE_EXTENT {int(wide_world_pulse[2], 0)}', f'#define DM_GAME_WIDE_WORLD_PULSE_BLEND {int(wide_world_pulse[3], 0):#x}ULL'] if wide_world_pulse else []),
             *([f'#define DM_GAME_WIDE_PREVIEW_VERTEX {q(wide_preview[0])}', f'#define DM_GAME_WIDE_PREVIEW_FRAGMENT {q(wide_preview[1])}',
                 f'#define DM_GAME_WIDE_PREVIEW_WIDTH {int(wide_preview[2], 0)}', f'#define DM_GAME_WIDE_PREVIEW_HEIGHT {int(wide_preview[3], 0)}',
                 f'#define DM_GAME_WIDE_PREVIEW_BLEND {int(wide_preview[4], 0):#x}ULL'] if wide_preview else []),

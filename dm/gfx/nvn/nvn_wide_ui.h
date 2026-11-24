@@ -88,6 +88,61 @@ static inline int DmWideWorldIcon(const float positions[4][2], const float uvs[4
         uvs[2][0] == uvs[3][0] && uvs[3][1] == uvs[0][1];
 }
 
+// Check the triangles of each observed four-vertex quad in a batch.
+static inline int DmWideWorldQuadIndices(const uint16_t *indices, unsigned quadCount) {
+    if (!quadCount || quadCount > 2) return 0;
+    for (unsigned quadIndex = 0; quadIndex < quadCount; quadIndex++) {
+        unsigned triangles[2] = {0, 0};
+        for (unsigned index = 0; index < 6; index++) {
+            unsigned vertex = indices[quadIndex * 6 + index];
+            if (vertex < quadIndex * 4 || vertex >= quadIndex * 4 + 4) return 0;
+            unsigned bit = 1u << (vertex - quadIndex * 4);
+            if (triangles[index / 3] & bit) return 0;
+            triangles[index / 3] |= bit;
+        }
+        unsigned shared = triangles[0] & triangles[1];
+        if ((triangles[0] | triangles[1]) != 15 || (shared != 5 && shared != 10)) return 0;
+    }
+    return 1;
+}
+
+// Recognise a batch only when every indexed quad is an observed world-map icon.
+static inline int DmWideWorldIconBatch(const float positions[][4][2], const float uvs[][4][2], const uint16_t *indices,
+                                       unsigned quadCount, float atlasWidth, float atlasHeight,
+                                       const float *sizes, unsigned sizeCount) {
+    if (!DmWideWorldQuadIndices(indices, quadCount)) return 0;
+    for (unsigned quadIndex = 0; quadIndex < quadCount; quadIndex++)
+        if (!DmWideWorldIcon(positions[quadIndex], uvs[quadIndex], atlasWidth, atlasHeight, sizes, sizeCount)) return 0;
+    return 1;
+}
+
+// Recognise the observed pair of rotating, concentric pulse texture squares.
+static inline int DmWideWorldPulse(const float positions[][4][2], const float uvs[][4][2], const uint16_t *indices,
+                                   float textureWidth, float textureHeight, float extent) {
+    if (textureWidth <= 0 || textureHeight <= 0 || extent <= 0 || !DmWideWorldQuadIndices(indices, 2)) return 0;
+    float lengths[2], centresX[2], centresY[2];
+    for (unsigned quadIndex = 0; quadIndex < 2; quadIndex++) {
+        const float (*position)[2] = positions[quadIndex], (*uv)[2] = uvs[quadIndex];
+        float edge1X = position[1][0] - position[0][0], edge1Y = position[1][1] - position[0][1];
+        float edge2X = position[3][0] - position[0][0], edge2Y = position[3][1] - position[0][1];
+        lengths[quadIndex] = edge1X * edge1X + edge1Y * edge1Y;
+        float otherLength = edge2X * edge2X + edge2Y * edge2Y;
+        centresX[quadIndex] = (position[0][0] + position[2][0]) / 2;
+        centresY[quadIndex] = (position[0][1] + position[2][1]) / 2;
+        if (!(lengths[quadIndex] > 0 && isfinite(lengths[quadIndex]) && isfinite(otherLength) &&
+              isfinite(centresX[quadIndex]) && isfinite(centresY[quadIndex])) ||
+            fabsf(lengths[quadIndex] - otherLength) > lengths[quadIndex] * 0.001f ||
+            fabsf(edge1X * edge2X + edge1Y * edge2Y) > lengths[quadIndex] * 0.001f ||
+            fabsf(position[0][0] + position[2][0] - position[1][0] - position[3][0]) > 0.01f ||
+            fabsf(position[0][1] + position[2][1] - position[1][1] - position[3][1]) > 0.01f ||
+            uv[0][0] != 0 || uv[0][1] != 0 || uv[1][0] != 0 || uv[3][1] != 0 ||
+            uv[1][1] != uv[2][1] || uv[2][0] != uv[3][0] ||
+            !(fabsf(uv[2][0] * textureWidth - extent) < 0.01f) || !(fabsf(uv[2][1] * textureHeight - extent) < 0.01f)) return 0;
+    }
+    return fabsf(centresX[0] - centresX[1]) < 0.01f && fabsf(centresY[0] - centresY[1]) < 0.01f &&
+        fabsf(lengths[0] - lengths[1]) < lengths[0] * 0.001f;
+}
+
 static inline int DmWideUiFullOverlay(const float *values, const DmWideUiVertex *vertices, float width, float height) {
     const float IDENTITY[12] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0};
     unsigned triangles[2] = {0, 0};
