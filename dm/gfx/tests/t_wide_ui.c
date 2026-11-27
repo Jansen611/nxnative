@@ -36,6 +36,21 @@ int main(void) {
     Check(!DmWideMapMaskQuad(maskPositions, maskIndices, 1920, 1080), "degenerate mask refused");
     maskIndices[5] = 4;
     Check(!DmWideMapMaskQuad(maskPositions, maskIndices, 1920, 1080), "invalid mask index refused");
+    struct { float x, y, z; uint32_t colour; float u, v; } zoomVertices[8] = {
+        {1100, 200, 0, 0, 898.0f / 1024, 110.0f / 512}, {1100, 244, 0, 0, 898.0f / 1024, 154.0f / 512},
+        {1144, 244, 0, 0, 942.0f / 1024, 154.0f / 512}, {1144, 200, 0, 0, 942.0f / 1024, 110.0f / 512},
+        {1300, 300, 0, 0, 1007.0f / 1024, 0}, {1300, 306, 0, 0, 1007.0f / 1024, 8.0f / 512},
+        {1306, 306, 0, 0, 1015.0f / 1024, 8.0f / 512}, {1306, 300, 0, 0, 1015.0f / 1024, 0}
+    };
+    uint16_t zoomIndices[12] = {0, 1, 2, 0, 2, 3, 4, 5, 6, 4, 6, 7};
+    const float ZOOM_MARKERS[][4] = {{1007, 0, 8, 8}, {898, 110, 44, 44}};
+    Check(DmWideMapZoomBatch(zoomVertices, sizeof zoomVertices, zoomIndices, 12, 1024, 512, ZOOM_MARKERS, 1), "zoomed map marker batch");
+    Check(!DmWideMapZoomBatch(zoomVertices, sizeof zoomVertices - 1, zoomIndices, 12, 1024, 512, ZOOM_MARKERS, 1), "short zoomed map buffer refused");
+    zoomIndices[11] = 6;
+    Check(!DmWideMapZoomBatch(zoomVertices, sizeof zoomVertices, zoomIndices, 12, 1024, 512, ZOOM_MARKERS, 1), "degenerate zoomed map batch refused");
+    zoomIndices[11] = 7; zoomVertices[6].u += 1.0f / 1024;
+    Check(!DmWideMapZoomBatch(zoomVertices, sizeof zoomVertices, zoomIndices, 12, 1024, 512, ZOOM_MARKERS, 1), "other zoomed atlas marker refused");
+    Check(DmWideMapZoomBatch(zoomVertices, sizeof zoomVertices, zoomIndices, 12, 1024, 512, ZOOM_MARKERS, 2), "zoomed objective without enemy dots");
     Check(fabs(DmWidePreviewScale(2336, 1080, 1920, 1080) - (1920.0 / 2336) * (1920.0 / 2336)) < 0.000001, "19.5:9 preview alignment");
     Check(fabs(DmWidePreviewScale(2160, 1080, 1920, 1080) - (1920.0 / 2160) * (1920.0 / 2160)) < 0.000001, "18:9 preview alignment");
     Check(DmWidePreviewScale(1920, 1080, 1920, 1080) == 1, "16:9 preview unchanged");

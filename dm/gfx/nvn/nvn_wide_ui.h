@@ -1,5 +1,6 @@
 #pragma once
 #include <math.h>
+#include <stddef.h>
 #include <stdint.h>
 #include <string.h>
 
@@ -61,6 +62,43 @@ static inline int DmWideMapMaskQuad(const float positions[4][2], const uint16_t 
     }
     unsigned shared = triangles[0] & triangles[1];
     return (triangles[0] | triangles[1]) == 15 && (shared == 9 || shared == 6);
+}
+
+// Recognise the indexed marker batch used by the observed zoomed Order map.
+static inline int DmWideMapZoomBatch(const void *vertexData, size_t vertexBytes, const void *indexData, unsigned indexCount,
+                                     float atlasWidth, float atlasHeight, const float markers[][4], unsigned markerCount) {
+    if (!vertexData || !indexData || indexCount < 6 || indexCount > 6144 || indexCount % 6 ||
+        vertexBytes != (size_t)indexCount * 16 || atlasWidth <= 0 || atlasHeight <= 0 || !markers || !markerCount) return 0;
+    const unsigned char *vertices = vertexData, *indices = indexData;
+    int foundMarker = 0;
+    for (unsigned quadIndex = 0; quadIndex < indexCount / 6; quadIndex++) {
+        const uint16_t EXPECTED[6] = {quadIndex * 4, quadIndex * 4 + 1, quadIndex * 4 + 2,
+                                      quadIndex * 4, quadIndex * 4 + 2, quadIndex * 4 + 3};
+        uint16_t actual[6]; memcpy(actual, indices + quadIndex * sizeof actual, sizeof actual);
+        if (memcmp(actual, EXPECTED, sizeof actual)) return 0;
+        float positions[4][2], uvs[4][2];
+        for (unsigned vertexIndex = 0; vertexIndex < 4; vertexIndex++) {
+            const unsigned char *vertex = vertices + (quadIndex * 4 + vertexIndex) * 24;
+            memcpy(positions[vertexIndex], vertex, sizeof positions[vertexIndex]);
+            memcpy(uvs[vertexIndex], vertex + 16, sizeof uvs[vertexIndex]);
+        }
+        float edge1X = positions[1][0] - positions[0][0], edge1Y = positions[1][1] - positions[0][1];
+        float edge2X = positions[3][0] - positions[0][0], edge2Y = positions[3][1] - positions[0][1];
+        float area = edge1X * edge2Y - edge1Y * edge2X;
+        if (!(isfinite(area) && fabsf(area) > 0.001f && isfinite(positions[2][0]) && isfinite(positions[2][1])) ||
+            !(fabsf(positions[0][0] + positions[2][0] - positions[1][0] - positions[3][0]) < 0.01f) ||
+            !(fabsf(positions[0][1] + positions[2][1] - positions[1][1] - positions[3][1]) < 0.01f) ||
+            uvs[0][0] != uvs[1][0] || uvs[1][1] != uvs[2][1] ||
+            uvs[2][0] != uvs[3][0] || uvs[3][1] != uvs[0][1]) continue;
+        for (unsigned markerIndex = 0; markerIndex < markerCount; markerIndex++) {
+            const float *marker = markers[markerIndex];
+            if (marker[2] > 0 && marker[3] > 0 &&
+                fabsf(uvs[0][0] * atlasWidth - marker[0]) < 0.01f && fabsf(uvs[0][1] * atlasHeight - marker[1]) < 0.01f &&
+                fabsf(uvs[2][0] * atlasWidth - marker[0] - marker[2]) < 0.01f &&
+                fabsf(uvs[2][1] * atlasHeight - marker[1] - marker[3]) < 0.01f) foundMarker = 1;
+        }
+    }
+    return foundMarker;
 }
 
 // Align the observed wide-to-fixed-to-wide preview map with the source map.

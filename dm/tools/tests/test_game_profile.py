@@ -91,6 +91,19 @@ class WideUI(unittest.TestCase):
             self.assertNotEqual(result, 0)
             self.assertIn('wide_world_map requires wide_map', output)
 
+    def test_map_zoom_rule(self):
+        wide = 'wide_ui\t' + ' '.join([self.BUILD, '1920', '1080', *self.KEYS]) + '\n'
+        map_rule = 'wide_map\t0123456789abcdef fedcba9876543210 1024 512\n'
+        zoom_rule = 'wide_map_zoom\t0x4860a1828 1007 0 8 8\n'
+        self.assertEqual(header(self.REGISTERED + wide + map_rule + zoom_rule), (0, ''))
+        for rows in (self.REGISTERED + wide + zoom_rule,
+                     self.REGISTERED + wide + map_rule + zoom_rule.replace('1007', '1024'),
+                     self.REGISTERED + wide + map_rule + zoom_rule.replace('8 8', '0 8'),
+                     self.REGISTERED + wide + map_rule + zoom_rule.replace('0x4860a1828', '-1')):
+            result, output = header(rows)
+            self.assertNotEqual(result, 0)
+            self.assertIn('wide_map_zoom requires wide_map', output)
+
     def test_world_pulse_rule(self):
         wide = 'wide_ui\t' + ' '.join([self.BUILD, '1920', '1080', *self.KEYS]) + '\n'
         map_rule = 'wide_map\t0123456789abcdef fedcba9876543210 1024 512\n'

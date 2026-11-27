@@ -254,6 +254,20 @@ def header_one(g):
     wide_map_mask = g.words('wide_map_mask', '')
     if wide_map_mask and (not wide_map or len(wide_map_mask) != 1 or not re.fullmatch(r'[0-9a-f]{16}', wide_map_mask[0])):
         sys.exit(f'{g.id}: wide_map_mask requires wide_map and a fragment key')
+    wide_map_zoom = g.words('wide_map_zoom', '')
+    if wide_map_zoom:
+        try:
+            zoom_values = [int(value, 0) for value in wide_map_zoom]
+            valid_map_zoom = (bool(wide_map) and len(zoom_values) >= 5 and (len(zoom_values) - 1) % 4 == 0 and
+                              0 <= zoom_values[0] <= 0xffffffffffffffff and
+                              all(0 <= value <= 8192 for value in zoom_values[1:]) and
+                              all(zoom_values[index + 2] > 0 and zoom_values[index + 3] > 0 and
+                                  zoom_values[index] + zoom_values[index + 2] <= int(wide_map[2], 0) and
+                                  zoom_values[index + 1] + zoom_values[index + 3] <= int(wide_map[3], 0)
+                                  for index in range(1, len(zoom_values), 4)))
+        except (ValueError, IndexError):
+            valid_map_zoom = False
+        if not valid_map_zoom: sys.exit(f'{g.id}: wide_map_zoom requires wide_map, blend state and in-atlas marker rectangles')
     wide_world_map = g.words('wide_world_map', '')
     if wide_world_map:
         try:
@@ -336,6 +350,8 @@ def header_one(g):
             *([f'#define DM_GAME_WIDE_MAP_VERTEX {q(wide_map[0])}', f'#define DM_GAME_WIDE_MAP_FRAGMENT {q(wide_map[1])}',
                 f'#define DM_GAME_WIDE_MAP_TEXTURE_WIDTH {int(wide_map[2], 0)}', f'#define DM_GAME_WIDE_MAP_TEXTURE_HEIGHT {int(wide_map[3], 0)}'] if wide_map else []),
             *([f'#define DM_GAME_WIDE_MAP_MASK_FRAGMENT {q(wide_map_mask[0])}'] if wide_map_mask else []),
+            *([f'#define DM_GAME_WIDE_MAP_ZOOM_BLEND {int(wide_map_zoom[0], 0):#x}ULL',
+                f'#define DM_GAME_WIDE_MAP_ZOOM_UV {", ".join("{" + ", ".join(str(int(value, 0)) for value in wide_map_zoom[index:index + 4]) + "}" for index in range(1, len(wide_map_zoom), 4))}'] if wide_map_zoom else []),
              *([f'#define DM_GAME_WIDE_WORLD_MAP_WIDTH {int(wide_world_map[0], 0)}', f'#define DM_GAME_WIDE_WORLD_MAP_HEIGHT {int(wide_world_map[1], 0)}',
                  f'#define DM_GAME_WIDE_WORLD_MAP_SIZES {", ".join(str(int(value, 0)) for value in wide_world_map[2:])}'] if wide_world_map else []),
              *([f'#define DM_GAME_WIDE_WORLD_PULSE_WIDTH {int(wide_world_pulse[0], 0)}', f'#define DM_GAME_WIDE_WORLD_PULSE_HEIGHT {int(wide_world_pulse[1], 0)}',

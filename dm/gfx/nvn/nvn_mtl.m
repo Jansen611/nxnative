@@ -16249,6 +16249,54 @@ static double DmWideMapOffset(NvProg *program, const p_draw_idx *draw, NSUIntege
         }
     }
 #endif
+#ifdef DM_GAME_WIDE_MAP_ZOOM_BLEND
+    if (program && program->sh[0] && program->sh[1] &&
+        !strncmp(program->sh[0]->key, DM_GAME_WIDE_MAP_VERTEX, 16) &&
+        !strncmp(program->sh[1]->key, DM_GAME_WIDE_MAP_FRAGMENT, 16) && DmWideUiSelected(width, height) &&
+        draw && draw->prim == 4 && draw->instances == 1 && draw->itype == 1 && !draw->base_vertex &&
+        !draw->ind && !draw->mdi_cnt && !S.restart.on && !S.ds.st && !S.ds.dt && !S.ds.dw && S.color.blend_en == 1 &&
+        draw->count >= 6 && draw->count <= 6144 && draw->count % 6 == 0 &&
+        S.nattr >= 3 && S.attr[0].fmt == 0x22 && S.attr[0].stream == 0 && S.attr[0].offset == 0 &&
+        S.attr[2].fmt == 0x16 && S.attr[2].stream == 0 && S.attr[2].offset == 16 &&
+        S.stream[0].stride == 24 && !S.stream[0].divisor && S.vbuf[0].size == (uint64_t)draw->count * 16 &&
+        (!S.has_vp || (S.vp[0][0] == 0 && S.vp[0][1] == 0 && S.vp[0][2] == width && S.vp[0][3] == height)) &&
+        (!R.has_sc || (R.sc.x == 0 && R.sc.y == 0 && R.sc.w == width && R.sc.h == height))) {
+        uint64_t blend; memcpy(&blend, &S.blend[0], sizeof blend);
+        int textureId = (int)(S.tex[1][0] & 0xfffff), mapTexture = 0;
+        os_unfair_lock_lock(&g_rmu);
+        if (textureId > 0 && textureId < g_ntreg && g_treg[textureId].ok)
+            mapTexture = g_treg[textureId].t.d.width == DM_GAME_WIDE_MAP_TEXTURE_WIDTH &&
+                         g_treg[textureId].t.d.height == DM_GAME_WIDE_MAP_TEXTURE_HEIGHT;
+        os_unfair_lock_unlock(&g_rmu);
+        const uint64_t INDEX_BYTES = (uint64_t)draw->count * 2, VERTEX_BYTES = S.vbuf[0].size;
+        const p_bind_buf *uniform = &S.ubo[0][0];
+        void *buffer; uint64_t offset, gpu;
+        if (mapTexture && blend == DM_GAME_WIDE_MAP_ZOOM_BLEND && !g_pend_over &&
+            draw->ibuf && draw->ibuf <= UINT64_MAX - INDEX_BYTES &&
+            !nvn_sparse_alias(draw->ibuf, draw->ibuf + INDEX_BYTES) && !geo_cpu_hazard(draw->ibuf, INDEX_BYTES) &&
+            !(g_nubd && ubd_hits(draw->ibuf, draw->ibuf + INDEX_BYTES)) && nvn_host_readable(draw->ibuf, INDEX_BYTES) &&
+            S.vbuf[0].address && S.vbuf[0].address <= UINT64_MAX - VERTEX_BYTES &&
+            !nvn_sparse_alias(S.vbuf[0].address, S.vbuf[0].address + VERTEX_BYTES) &&
+            !geo_cpu_hazard(S.vbuf[0].address, VERTEX_BYTES) &&
+            !(g_nubd && ubd_hits(S.vbuf[0].address, S.vbuf[0].address + VERTEX_BYTES)) && nvn_host_readable(S.vbuf[0].address, VERTEX_BYTES) &&
+            uniform->addr && uniform->size >= 16 && uniform->addr <= UINT64_MAX - 16 &&
+            !nvn_sparse_alias(uniform->addr, uniform->addr + 16) && !geo_cpu_hazard(uniform->addr, 16) &&
+            !(g_nubd && ubd_hits(uniform->addr, uniform->addr + 16)) &&
+            mtl_gpu_addr(uniform->addr, uniform->size, &buffer, &offset, &gpu)) {
+            const void *contents = [(__bridge id<MTLBuffer>)buffer contents];
+            if (contents) {
+                float projection[4]; memcpy(projection, (const char *)contents + offset, sizeof projection);
+                const float MARKERS[][4] = {DM_GAME_WIDE_MAP_ZOOM_UV};
+                if (DmWideMapProjection(projection, (float)width, (float)height) &&
+                    DmWideMapZoomBatch((const void *)(uintptr_t)S.vbuf[0].address, VERTEX_BYTES,
+                                       (const void *)(uintptr_t)draw->ibuf, draw->count,
+                                       DM_GAME_WIDE_MAP_TEXTURE_WIDTH, DM_GAME_WIDE_MAP_TEXTURE_HEIGHT,
+                                       MARKERS, sizeof MARKERS / sizeof MARKERS[0]))
+                    return DmWideMapMargin((uint32_t)width, (uint32_t)height, DM_GAME_WIDE_UI_WIDTH, DM_GAME_WIDE_UI_HEIGHT);
+            }
+        }
+    }
+#endif
     if (!program || !program->sh[0] || !program->sh[1] ||
         strncmp(program->sh[0]->key, DM_GAME_WIDE_MAP_VERTEX, 16) ||
         strncmp(program->sh[1]->key, DM_GAME_WIDE_MAP_FRAGMENT, 16) ||
