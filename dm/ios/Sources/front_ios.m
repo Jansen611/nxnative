@@ -18,8 +18,10 @@
 #import "CloudSaves.h"
 
 void dm_gamepad_active(void);
+void dm_gamepad_inactive(void);
 #import "DmLayout.h"
 #import "DmGameMenu.h"
+#import "DmRotation.h"
 
 void front_ios_boot(void);
 int front_ios_boot_ok(void);
@@ -27,6 +29,7 @@ const char *front_ios_boot_message(void);   // main.m: why a build that keeps th
 const char *front_ios_device_check(void);   // main.m: why this device cannot run the games (its GPU has no BC textures; NULL = supported)
 bool front_ios_hud_enabled_from_saved_choice(void);   // main.m: the saved choice enabled Metal's HUD at launch
 bool dm_show_launcher(void *view_controller, void (*done)(void));   // Launcher.swift: false = no launcher (no dm/launcher.json, or DM_LAUNCHER=0)
+void dm_prewarm_upload_schedule(void);
 
 static CAMetalLayer *g_layer;
 static void front_ios_notify_setup(void);
@@ -62,7 +65,8 @@ static UILabel *front_ios_fps_label(void);
     if (self.maxPixelWidth > 0) scale = MIN(scale, self.maxPixelWidth / MAX(self.bounds.size.width, 1));
     l.contentsScale = scale;
     screen_refresh();   // an iPad window moved to another display lays out again (the display scale trait above)
-    l.drawableSize = CGSizeMake(self.bounds.size.width * l.contentsScale, self.bounds.size.height * l.contentsScale);
+    CGSize px = CGSizeMake(self.bounds.size.width * l.contentsScale, self.bounds.size.height * l.contentsScale);
+    if (!CGSizeEqualToSize(l.drawableSize, px)) { l.drawableSize = px; dm_fstep_settle(); }
 }
 @end
 static void tv_attach(void);
@@ -169,11 +173,13 @@ static void launcher_done(void) { [g_root startGame]; }
             }
         }
     }
+    dm_rotation_set(NULL);   // the launcher's pick (Play put it in the environment), a saved one with DM_LAUNCHER=0, or an env file's
     self.fill = dm_picture_fill(getenv("DM_PICTURE_FIT"));
     if (self.fill) LOG("front end: picture Fill (DM_PICTURE_FIT=fill), the 16:9 picture covers the screen in landscape and its edges are cropped");
     self.view.clipsToBounds = YES;   // with Fill the game view is larger than the screen
     self.view.window.traitOverrides.preferredContentSizeCategory = UIContentSizeCategorySmall;   // UIKit draws the in-game menu (GameMenu.swift) in this window: it keeps one compact text size over the game, whatever the system's text size
     self.game = [[DmGameView alloc] initWithFrame:self.view.bounds];
+    dm_prewarm_upload_schedule();
     [self.view addSubview:self.game];
     g_layer = (CAMetalLayer *)self.game.layer;
     if (getenv("DM_METAL_HUD") && atoi(getenv("DM_METAL_HUD"))) { g_layer.developerHUDProperties = @{@"mode": @"default"}; LOG("front end: Metal performance HUD on (DM_METAL_HUD)"); }   // Apple's HUD over the game: frame rate, frame and GPU time, memory
@@ -241,9 +247,42 @@ static void launcher_done(void) { [g_root startGame]; }
 - (BOOL)prefersHomeIndicatorAutoHidden { return YES; }
 - (UIRectEdge)preferredScreenEdgesDeferringSystemGestures { return UIRectEdgeAll; }   // Edge gestures need two swipes, to avoid accidental exits
 - (BOOL)prefersStatusBarHidden { return YES; }
-- (UIInterfaceOrientationMask)supportedInterfaceOrientations { return UIInterfaceOrientationMaskAll; }
+- (UIInterfaceOrientationMask)supportedInterfaceOrientations { return dm_rotation_vc_mask(); }
 @end
 UIViewController *front_ios_root(void) { return [DmRootVC new]; }
+
+// Rotation (DM_ROTATION; DmRotation.h, DmLayout.h dm_rotation_mask). The phone's Info.plist lists only the two landscapes (the Duo's inner display follows its bounds) and the iPad's
+// all four; the app delegate (main.m) answers with this, which replaces that list, so portrait can be chosen on a phone too while auto keeps each device's list
+UIInterfaceOrientationMask dm_rotation_vc_mask(void) { return dm_rotation_mask(getenv("DM_ROTATION"), UIInterfaceOrientationMaskAll); }
+static UIInterfaceOrientationMask plist_orientations(void) {
+    NSArray *list = nil;
+    if (UIDevice.currentDevice.userInterfaceIdiom == UIUserInterfaceIdiomPad) list = [NSBundle.mainBundle objectForInfoDictionaryKey:@"UISupportedInterfaceOrientations~ipad"];
+    if (![list isKindOfClass:NSArray.class]) list = [NSBundle.mainBundle objectForInfoDictionaryKey:@"UISupportedInterfaceOrientations"];
+    UIInterfaceOrientationMask m = 0;
+    if ([list isKindOfClass:NSArray.class]) for (id o in list) {
+        if ([o isEqual:@"UIInterfaceOrientationPortrait"]) m |= UIInterfaceOrientationMaskPortrait;
+        else if ([o isEqual:@"UIInterfaceOrientationPortraitUpsideDown"]) m |= UIInterfaceOrientationMaskPortraitUpsideDown;
+        else if ([o isEqual:@"UIInterfaceOrientationLandscapeLeft"]) m |= UIInterfaceOrientationMaskLandscapeLeft;
+        else if ([o isEqual:@"UIInterfaceOrientationLandscapeRight"]) m |= UIInterfaceOrientationMaskLandscapeRight;
+    }
+    return m ? m : UIInterfaceOrientationMaskAll;
+}
+UIInterfaceOrientationMask front_ios_app_orientations(void) { return dm_rotation_mask(getenv("DM_ROTATION"), plist_orientations()); }
+void dm_rotation_set(const char *value) {
+    if (value) setenv("DM_ROTATION", value, 1);
+    const char *now = getenv("DM_ROTATION"); if (!now || !*now) now = "auto";
+    static char was[16]; if (strcmp(was, now)) { snprintf(was, sizeof was, "%s", now); LOG("front end: rotation %s (DM_ROTATION)", now); }
+    UIInterfaceOrientationMask m = front_ios_app_orientations() & dm_rotation_vc_mask();
+    for (UIScene *sc in UIApplication.sharedApplication.connectedScenes) {
+        if (![sc isKindOfClass:UIWindowScene.class] || ![sc.session.role isEqualToString:UIWindowSceneSessionRoleApplication]) continue;   // not a TV's
+        UIWindowScene *ws = (UIWindowScene *)sc;
+        for (UIWindow *w in ws.windows) for (UIViewController *vc = w.rootViewController; vc; vc = vc.presentedViewController) [vc setNeedsUpdateOfSupportedInterfaceOrientations];
+        // UIKit turns a window whose orientation the new mask leaves out only when asked: a lock chosen while upright turns the screen at once
+        if (m && !(m & (1u << ws.effectiveGeometry.interfaceOrientation)))
+            [ws requestGeometryUpdateWithPreferences:[[UIWindowSceneGeometryPreferencesIOS alloc] initWithInterfaceOrientations:m] errorHandler:^(NSError *e) {
+                LOG("front end: rotation %s: the window did not turn (%s)", now, e.localizedDescription.UTF8String); }];
+    }
+}
 
 // A TV (cable or AirPlay): iOS gives the app the TV as a scene of its own instead of mirroring the phone. The game's view moves there, 16:9 fills the TV, and the game is
 // docked as a Switch on its dock (1080p, the operation mode change notification); the phone keeps the pad. Unplugging puts the view back and the mode the game had before
@@ -297,6 +336,7 @@ bool dm_setting_live(const char *env, const char *value) {
         dm_set_opmode(m); dm_gamepad_opmode_changed(); LOG("front end: console mode %s (in-game menu)", m ? "docked" : "handheld");
         return true;
     }
+    if (!strcmp(env, "DM_ROTATION")) { if (value) dm_rotation_set(value); return true; }
     if (!strcmp(env, "DM_SHOW_FPS")) { if (value) [g_root showFPS:atoi(value) != 0]; return true; }
     if (!strcmp(env, "DM_TOUCH_HAPTICS")) { if (value) dm_gamepad_touch_feedback(atoi(value) != 0); return true; }
     if (!strcmp(env, "DM_RUMBLE")) { if (value) { dm_haptics_set_enabled(atoi(value) != 0); LOG("front end: game rumble %s (in-game menu)", atoi(value) ? "on" : "off"); } return true; }
@@ -645,7 +685,7 @@ static void save_sync_background(void) {
 void front_ios_focus_event(int ev) {
     if (!g_layer) return;
     switch (ev) {
-        case 0: dm_movie_active(0); dm_gamepad_reset(); dm_focus_set(2); break;
+        case 0: dm_movie_active(0); dm_gamepad_inactive(); dm_focus_set(2); break;
         case 1:
             UIApplication.sharedApplication.idleTimerDisabled = NO;
             dm_focus_set(3);
@@ -660,6 +700,8 @@ void front_ios_focus_event(int ev) {
             UIApplication.sharedApplication.idleTimerDisabled = YES;
             if (g_audio_intr) { LOG("audio session: active again with no interruption-ended notice; resuming"); g_audio_intr = 0; g_session_off = 1; }
             if (g_session_off) front_ios_audio_session();
-            front_ios_audio_apply(); dm_gamepad_active(); dm_focus_set(1); dm_movie_active(1); break;
+            front_ios_audio_apply(); dm_gamepad_active(); dm_focus_set(1); dm_movie_active(1);
+            dm_prewarm_upload_schedule();
+            break;
     }
 }
