@@ -156,6 +156,28 @@ int main(void) { @autoreleasepool {
         CHECK(ghost_n() == NGHOST, "a commit evicts nothing at NGHOST");
         step("ghost eviction");
     }
+    {   // no-BC fork, memory pressure (mem_pressure_tick): the ghost limit holds the table to 64 whether its entries are idle or in use, the least recently used going first, each
+        // seen by the callback before it goes; puts keep to the limit while it is low; raised back to NGHOST the table grows past 64 again
+        enum { BASE = 942000, LIM = 64 };
+        idle(); trim_all();
+        NSMutableArray *objs = [NSMutableArray array];
+        for (int i = 0; i < 200; i++) { id o = [NSObject new]; [objs addObject:o]; tex_put(BASE + (uint64_t)i, o); }   // all just used: none idle
+        CHECK(ghost_n() >= 200, "the pressure case starts with entries in use, past the limit it will get");
+        tex_get(BASE);   // the oldest put used again: the newest use, so the last to go
+        __block unsigned seen = 0; unsigned n;
+        pthread_mutex_lock(&g_smu); uint32_t before = own_stats_locked().ghost; own_ghost_limit_set_locked(LIM);
+        n = own_ghost_enforce_locked(^(id o) { (void)o; seen++; }); pthread_mutex_unlock(&g_smu);
+        CHECK(ghost_n() == LIM && n == before - LIM && seen == n, "the limit drops entries in use too, down to it, and the callback sees each one");
+        CHECK(ghost(BASE) && !ghost(BASE + 1) && !holds(objs[1]) && dropped(objs[1], 0), "the least recently used goes first: the one used again stays, its neighbour is dropped and no longer held");
+        step("ghost limit enforced");
+        for (int i = 0; i < 20; i++) tex_put(BASE + 500 + (uint64_t)i, [NSObject new]);
+        CHECK(ghost_n() <= LIM, "while the limit is low a put keeps the table to it");
+        pthread_mutex_lock(&g_smu); own_ghost_limit_set_locked(NGHOST); pthread_mutex_unlock(&g_smu);
+        for (int i = 0; i < 100; i++) tex_put(BASE + 600 + (uint64_t)i, [NSObject new]);
+        CHECK(ghost_n() > LIM + 20, "back at NGHOST the table grows past the old limit again");
+        step("ghost limit raised");
+        idle(); trim_all();
+    }
     {   // more finalized serials than NGHOST resolved every frame (Ocarina of Time streaming an area in): none goes while in use and none is put again; once idle they go,
         // GHOST_TRIM a commit at most, until the table is back at NGHOST
         enum { BASE = 941000, N = 4 * NGHOST };

@@ -112,6 +112,11 @@ void own_alias_at_locked(const void *pool, int64_t off, void (^fn)(const alias_k
 void own_alias_each_locked(void (^fn)(const alias_key *k, id o));
 typedef struct { uint32_t n, cap, cells; uint64_t evicted, taken, pool_entries, looks; } own_alias_stats;   // entries, capacity, index cells, evicted with pools / on takeover in total, serial entries that went with their pools, entries takeovers looked at
 own_alias_stats own_alias_stats_locked(void);
+typedef struct { uint32_t over_buffer, own; uint64_t own_bytes; } own_alias_unref;   // split: textures over a pool buffer (no memory of their own) / with memory of their own and its size
+uint32_t own_alias_unref_locked(own_alias_unref *split);      // entries no live or ghost entry resolves to (a walk: the memory report); split may be NULL
+uint32_t own_alias_evict_idle_locked(uint64_t idle_subs, uint64_t *bytes);   // no-BC fork, pressure trim: those with memory of their own not looked up for idle_subs submissions are retired
+void own_ghost_limit_set_locked(unsigned limit);              // no-BC fork, pressure trim: the ghost table's limit (NGHOST normal)
+unsigned own_ghost_enforce_locked(void (^each)(id o));        // no-BC fork: drop the least recently used entries, idle or not, down to the limit; each sees them first. → how many
 // The entries only the sharing table keeps: no live or finalized serial, view or pin holds their texture (entry_holds, tex_object_pinned). Bytes count each texture once
 // (allocatedSize, several keys can name one); writable_bytes is the part made to be drawn into or written by shaders, whose content the pool may not have; oldest_idle is the
 // longest any of them has gone without a lookup, in submissions (issue #2629: how much of a long session's memory growth they are). A walk: the memory report

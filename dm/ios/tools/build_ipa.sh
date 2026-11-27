@@ -126,6 +126,7 @@ if [ -f "$PATCHED/nro.tsv" ]; then cp "$PATCHED/nro.tsv" $TD/ || die "copy the N
 if [ "$GFXAPI" = vulkan ] || [ "$GFXAPI" = gl ]; then cp "$GD/shader_map.tsv" $TD/ || die "copy shader tables"   # empty NVN table: the NVN layer draws nothing
 else cp "$GD/shader_map.tsv" "$GD/c1_full.tsv" $TD/ || die "copy shader tables"
   if [ -f "$GD/cb_extent.tsv" ]; then cp "$GD/cb_extent.tsv" $TD/ || die "copy cb_extent.tsv"; else t "no $GD/cb_extent.tsv: the host copies whole uniform bindings"; fi
+  if [ -f "$GD/bc3_keep_rgba8.tsv" ]; then cp "$GD/bc3_keep_rgba8.tsv" $TD/ || die "copy bc3_keep_rgba8.tsv"; fi   # optional: BC3 textures that stay RGBA8 on a GPU without BC
   # the shader pairs, beside the shader map where the pipeline prebuild reads them (nvn_mtl.m pso_prebuild): without them the app makes no pulling bases, and a hybrid draw has no stand-in
   for f in shader_pairs.tsv pso_pairs.tsv; do if [ -f "$GD/$f" ]; then cp "$GD/$f" $TD/ || die "copy $f"; fi; done; fi   # optional
 # A profile may have no recorded prewarm seeds yet (Pokopia). The host also reads the device's own list.

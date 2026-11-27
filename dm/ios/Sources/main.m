@@ -107,19 +107,9 @@ const char *front_ios_boot_message(void) { return g_boot_message[0] ? g_boot_mes
 static bool g_hud_enabled_from_saved_choice;
 bool front_ios_hud_enabled_from_saved_choice(void) { return g_hud_enabled_from_saved_choice; }
 
-// Why this device cannot run the games: its GPU has no BC texture formats, which the games' textures use and the host does not decompress (dm/gfx/tex/README.md; the A16 and older,
-// GitHub issue #704), so the screen says so instead of Metal aborting at the game's first BC texture. NULL on a supported device. Called by startGame (front_ios.m) once the launcher has set
-// its switches, so this device check gives front_hud_env() a chance to enable the Performance HUD at Play (GitHub issue #840).
-const char *front_ios_device_check(void) {
-    static char msg[320]; static int done;
-    if (done++) return msg[0] ? msg : NULL;
-    id<MTLDevice> gpu = MTLCreateSystemDefaultDevice();   // the system default device, the one the graphics layers take (mtl_init repeats this check for the other routes)
-    if (gpu.supportsBCTextureCompression) return NULL;
-    snprintf(msg, sizeof msg, "This device's GPU (%s) cannot read BC-compressed textures, which the games use. It needs an iPhone 15 Pro or newer (A17 Pro chip or later) or an iPad with an M1 chip or later.",
-             gpu ? gpu.name.UTF8String : "no Metal device");
-    fprintf(stderr, "[RED] boot: %s\n", msg);
-    return msg;
-}
+// NVN supports devices without BC through runtime ASTC transcoding / decompression.
+// Keep the Play-time interface without creating a Metal device before launcher settings apply.
+const char *front_ios_device_check(void) { return NULL; }
 static void romfs_identity_report(NSString *doc) {
     romfs_id want, got;
     int rc = romfs_id_check([NSBundle.mainBundle.resourcePath stringByAppendingPathComponent:@"romfs.id"].fileSystemRepresentation,

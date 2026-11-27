@@ -34,7 +34,6 @@ static void front_ios_notify_ask(void);
 static void front_ios_power_watch(void);
 static void screen_refresh(void);
 static void front_ios_audio_watch(void);
-static UILabel *front_ios_fps_label(void);
 
 @interface DmGameView : UIView
 @property (nonatomic) CGFloat maxPixelWidth;   // 0: the screen's own pixels; a TV caps the drawable at 1920 across (tv_attach)
@@ -67,6 +66,7 @@ static UILabel *front_ios_fps_label(void);
 @end
 static void tv_attach(void);
 
+static UILabel *front_ios_fps_label(void);
 @interface DmRootView : UIView
 @end
 @implementation DmRootView
@@ -317,6 +317,7 @@ bool dm_setting_live(const char *env, const char *value) {
 
 // Thermal state and screen brightness for the power and present rows every 300 frames (hle_nvn.c; its weak defaults return -1 on the Mac). thermalState: 0 nominal, 1 fair, 2 serious, 3 critical.
 // Brightness is read on the main thread at start and on each change; every change of the thermal state and of Low Power Mode (which lowers the CPU clock) is logged with the time since launch
+void mtl_mem_pressure_request(int tier, int reason);
 static _Atomic double g_brightness = -1;
 int dm_thermal_now(void) { return (int)NSProcessInfo.processInfo.thermalState; }
 int dm_low_power_now(void) { return NSProcessInfo.processInfo.lowPowerModeEnabled; }   // the frame step does not probe in it (hle_nvn.c fstep_cpu_slowed)
@@ -328,6 +329,8 @@ static void front_ios_power_watch(void) {
         (void)n; LOG("front end: thermal state → %d (%.0f s after launch)", dm_thermal_now(), (now_ns() - g_t0_ns) / 1e9); }];
     [NSNotificationCenter.defaultCenter addObserverForName:NSProcessInfoPowerStateDidChangeNotification object:nil queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *n) {
         (void)n; LOG("front end: Low Power Mode → %s (%.0f s after launch)", dm_low_power_now() ? "on" : "off", (now_ns() - g_t0_ns) / 1e9); screen_refresh(); }];
+    [NSNotificationCenter.defaultCenter addObserverForName:UIApplicationDidReceiveMemoryWarningNotification object:nil queue:nil usingBlock:^(NSNotification *n) {
+        (void)n; LOG("front end: memory warning (%.0f s after launch)", (now_ns() - g_t0_ns) / 1e9); mtl_mem_pressure_request(1, 3); }];   // the trim itself runs at the next submission (nvn_mtl.m)
     [NSNotificationCenter.defaultCenter addObserverForName:UIScreenModeDidChangeNotification object:nil queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *n) { (void)n; screen_refresh(); }];
     screen_refresh();
     LOG("front end: thermal state %d, brightness %.2f, Low Power Mode %s, screen %d Hz", dm_thermal_now(), g_brightness, dm_low_power_now() ? "on" : "off", front_screen_max_fps());

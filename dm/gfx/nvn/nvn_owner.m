@@ -68,6 +68,7 @@ static void pool_tex_del(uint64_t serial) {
     if (!CFSetGetCount(set)) { nvn_hm_del(&g_pool_tex, &pk); CFRelease(set); }
 }
 static nvn_hmap g_ghost = {.klen = 8}; static uint64_t g_ghost_puts;
+static unsigned g_ghost_limit = NGHOST;   // no-BC fork: how many entries the table keeps; NGHOST normally, lower while memory is short (mem_pressure_tick), when entries go whether idle or not (own_ghost_enforce_locked)
 typedef struct ghost_use { struct ghost_use *prev, *next; uint64_t serial, frame, sub; } ghost_use;   // a ghost entry's last use
 static nvn_hmap g_ghost_use = {.klen = 8};    // serial → its ghost_use: the same serials as g_ghost
 static ghost_use *g_ghost_lru, *g_ghost_mru;  // the list, least recently used first
@@ -345,6 +346,18 @@ static void ghost_trim(unsigned budget) {
     }
 }
 void own_ghost_trim(void) { pthread_mutex_lock(&g_smu); ghost_trim(GHOST_TRIM); pthread_mutex_unlock(&g_smu); }
+// No-BC fork (memory pressure on a phone): the limit the table is held to, and the drop of its least recently used entries, idle or not, down to it. `each` sees every object
+// before it goes (the trim's byte count). Caller holds g_smu. An entry in use is dropped too, as the ring's oldest was: a record replayed later resolves its serial anew
+void own_ghost_limit_set_locked(unsigned limit) { g_ghost_limit = limit > NGHOST ? NGHOST : limit; }
+unsigned own_ghost_enforce_locked(void (^each)(id o)) {
+    unsigned dropped = 0;
+    while (g_ghost.n > g_ghost_limit && g_ghost_lru) {
+        uint64_t k = g_ghost_lru->serial;
+        if (each) { id ev = hm_get_id(&g_ghost, &k); if (ev) each(ev); }
+        ghost_del_locked(k); dropped++;
+    }
+    return dropped;
+}
 const void *own_resolve_ref(uint64_t k) {
     pthread_mutex_lock(&g_smu); const void *o = nvn_hm_get(&g_by_serial, &k);
     if (!o && g_ghost.n && (o = nvn_hm_get(&g_ghost, &k))) ghost_used(k);
@@ -359,7 +372,7 @@ static void tex_put_locked(uint64_t k, id o) {   // serials from 2^62 up are ext
     else if (m == &g_ghost) g_ghost_puts++;
     hm_put_id(m, &k, o); tex_pin *pin = nvn_hm_get(&g_tex_pins, &k); if (pin) tex_pin_set(pin, o); own_note(k);
     count_add(m == &g_by_serial ? &g_by_serial_held : &g_ghost_held, (__bridge void *)o, 1);
-    if (m == &g_ghost) { ghost_used(k); ghost_trim(2); }   // two per put: idle entries drain faster than new ones come
+    if (m == &g_ghost) { ghost_used(k); ghost_trim(2); if (g_ghost_limit < NGHOST) own_ghost_enforce_locked(NULL); }   // two per put: idle entries drain faster than new ones come; under pressure the limit holds whether or not they are idle (after the count: an entry it drops takes its count away)
 }
 void tex_put(uint64_t k, id o) { pthread_mutex_lock(&g_smu); tex_put_locked(k, o); pthread_mutex_unlock(&g_smu); }
 
@@ -587,6 +600,16 @@ void own_prog_pin(uint64_t serial) {
     os_unfair_lock_unlock(&g_prog_pin_lk);
 }
 
+uint32_t own_alias_unref_locked(own_alias_unref *split) {
+    CFMutableSetRef held = CFSetCreateMutable(NULL, 0, NULL); uint32_t n = 0;
+    if (split) *split = (own_alias_unref){0};
+    own_each_locked(^(uint64_t serial, id o, int ghost) { (void)serial; (void)ghost; CFSetAddValue(held, (__bridge const void *)o); });
+    for (uint32_t i = 0; i < g_alias.cap; i++) if (g_alias.vals[i] && !CFSetContainsValue(held, g_alias.vals[i])) {
+        n++;
+        if (split) { id<MTLTexture> mt = (__bridge id<MTLTexture>)g_alias.vals[i]; if (mt.buffer) split->over_buffer++; else { split->own++; split->own_bytes += mt.allocatedSize; } }
+    }
+    CFRelease(held); return n;
+}
 own_alias_unheld own_alias_unheld_locked(void) {
     own_alias_unheld s = {0}; uint64_t now = own_hook_submission();
     CFMutableSetRef sized = CFSetCreateMutable(NULL, 0, NULL);   // the textures counted
@@ -603,6 +626,19 @@ own_alias_unheld own_alias_unheld_locked(void) {
         if ([o respondsToSelector:@selector(usage)] && (((id<MTLTexture>)o).usage & (MTLTextureUsageRenderTarget | MTLTextureUsageShaderWrite))) s.writable_bytes += b;
     }
     CFRelease(sized); return s;
+}
+// No-BC fork, the pressure trim's tier 1 / 2: shared textures nothing resolves to, with memory of their own, not looked up for idle_subs submissions, are retired. *bytes: their size
+uint32_t own_alias_evict_idle_locked(uint64_t idle_subs, uint64_t *bytes) {
+    CFMutableSetRef held = CFSetCreateMutable(NULL, 0, NULL); uint32_t n = 0; alias_key *ks = NULL; uint64_t now = own_hook_submission(), b = 0;
+    own_each_locked(^(uint64_t serial, id o, int ghost) { (void)serial; (void)ghost; CFSetAddValue(held, (__bridge const void *)o); });
+    for (uint32_t i = 0; i < g_alias.cap; i++) { if (!g_alias.vals[i] || CFSetContainsValue(held, g_alias.vals[i])) continue;
+        alias_key k; memcpy(&k, g_alias.keys + (size_t)i * g_alias.klen, sizeof k);
+        uintptr_t seen = (uintptr_t)nvn_hm_get(&g_alias_seen, &k); if (seen && now - seen < idle_subs) continue;
+        id ot = (__bridge id)g_alias.vals[i]; if ([ot conformsToProtocol:@protocol(MTLTexture)] && ((id<MTLTexture>)ot).buffer) continue;   // over a pool buffer: no memory to give back
+        alias_key *nk = realloc(ks, (n + 1) * sizeof *ks); if (!nk) break; ks = nk; ks[n++] = k; }
+    for (uint32_t j = 0; j < n; j++) { id ob = hm_get_id(&g_alias, &ks[j]); if (ob) b += ((id<MTLResource>)ob).allocatedSize; alias_del(&ks[j]); }
+    if (n) { own_epoch(); g_alias_evicted += n; }
+    CFRelease(held); free(ks); if (bytes) *bytes = b; return n;
 }
 own_stats own_stats_locked(void) { return (own_stats){.live = g_by_serial.n, .live_cap = g_by_serial.cap, .ghost = g_ghost.n, .retire_wait = g_retire_wait.n, .ghost_puts = g_ghost_puts}; }
 void own_each_locked(void (^fn)(uint64_t serial, id o, int ghost)) {

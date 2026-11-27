@@ -21,7 +21,7 @@ The offsets of each level and layer within the storage, and the block height and
 
 ## BC textures
 
-Only GPUs with BC compressed textures are supported (`supportsBCTextureCompression` of `MTLDevice`: Apple silicon Macs and the latest iPhones), so BC textures are created and uploaded as BC; there is no decompression path. A device without them is refused at start ([GPUs without BC textures](../../../docs/reference/rendering.md#gpus-without-bc-textures-are-refused-at-start)). A BC texture is never a render target and its raw blocks are not sampled through an uncompressed view (Metal has no such views; Breath of the Wild encodes one 32×32 BC4 texture on the GPU, GitHub issue #4).
+The NVN layer uses native BC formats on GPUs that support them. On GPUs without BC support, it transcodes BC1–BC3 to ASTC 4x4 and decompresses other BC formats, including 3D textures. The user reported that Let's Go Pikachu entered the game on an A16 iPad; full gameplay and stability remain unverified. `DM_TEST_NO_BC=1` forces the fallback on a supported GPU for testing; `DM_NO_BC_ASTC=0` selects decompressed storage instead of ASTC.
 
 ## Tests
 

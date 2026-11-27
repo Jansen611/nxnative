@@ -83,6 +83,13 @@ t_gfx_suspend: t_gfx_suspend.c ../nvn/hle_nvn.c ../../host/crash.c ../../host/hl
 	clang $(CFLAGS) -fobjc-arc -o $@ t_gfx_suspend.c ../../host/crash.c ../../host/hle_bigstack.c t_host_stubs.c $(GFX) $(FW)
 t_mtl_init: t_mtl_init.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_mtl_init.m $(MTL_T_SRC) $(FW)
+t_bc2astc_gpu: t_bc2astc_gpu.m ../tex/nvn_bc2astc.c ../tex/nvn_bc2astc.h ../tex/bc2astc_core.h ../tex/bc2astc_body.inc ../tex/bc2astc_msl.h
+	clang $(CFLAGS) -fobjc-arc -o $@ t_bc2astc_gpu.m ../tex/nvn_bc2astc.c -framework Metal -framework Foundation
+t_astc_hw: t_astc_hw.m ../tex/nvn_bc2astc.c ../tex/nvn_bc2astc.h ../tex/bc2astc_core.h ../tex/bc2astc_body.inc
+	clang $(CFLAGS) -fobjc-arc -o $@ t_astc_hw.m ../tex/nvn_bc2astc.c -framework Metal -framework Foundation
+t_up_order: t_up_order.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_up_order.m $(MTL_T_SRC) $(FW)
+check_t_up_order: RUN_ENV = MTL_DEBUG_LAYER=1
 .PHONY: check_t_mtl_init
 check_t_mtl_init: t_mtl_init
 	./t_mtl_init
