@@ -33,6 +33,9 @@ int dm_players_reported(void);   // the players the game sees: player 1 and each
 void dm_motion_set(int player, const float acc[3], const float rot[3]);
 void dm_motion_set_switch(int player, const float acc[3], const float rot[3]);   // player 0 only: the phone's own sensors in the Switch frame, kept separate; DM_MOTION_AXES does not apply
 void dm_motion_clear(int player);   // clears GameController motion; another fresh source can take over
+// Player 1's right stick drives the six-axis sensor while enabled. Changing the mode resets its pose to level.
+int dm_stick_motion_enabled(void);
+void dm_stick_motion_set(int enabled);
 // Passive controller HID, already in the Switch frame (G, rad/s). sample_ns is the sample's host now_ns() time, not the packet's arrival; stale / reordered samples are ignored.
 // Kept separate from GameController and the phone; used while GameController supplies no fresh motion for that player. DM_MOTION_AXES / ACC_SIGN apply only to GameController.
 void dm_motion_set_hid(int player, const float acc[3], const float rot[3], uint64_t sample_ns);
@@ -43,7 +46,6 @@ void dm_motion_clear_hid(int player);
 void dm_joy_attach(int pad, uint32_t sides);   // sides | DM_JOY_2: they are Joy-Con 2s (the Switch 2 styles, the mouse sensor)
 #define DM_JOY_2 4u
 void dm_joy_set(int pad, int side, uint64_t buttons, int32_t sx, int32_t sy);   // side 0 left, 1 right
-void dm_joy_motion(int pad, uint32_t sides);   // sides whose front end feeds motion for a pad it still reads whole (buttons and sticks from GameController)
 void dm_motion_set_joy(int pad, int side, const float acc[3], const float rot[3], uint64_t sample_ns);   // like dm_motion_set_hid, for one Joy-Con's sensor
 void dm_motion_clear_joy(int pad, int side);
 // A Joy-Con's mouse sensor (the Joy-Con 2's, on its rail side): the movement since the last report, in sensor counts (x right, y toward the player), and its state (DM_JOYMOUSE_*).
