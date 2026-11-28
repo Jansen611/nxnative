@@ -29,6 +29,8 @@ targets:
         CFBundleDisplayName: DuoHarness
         CFBundleShortVersionString: "1.0"
         CFBundleVersion: "2"
+        DMTitleID: "01007EF00011E000"
+        DMPrewarmUploadURL: "https://script.google.com/macros/s/test/exec"
         UILaunchScreen: {}
         UIStatusBarHidden: true
         UIViewControllerBasedStatusBarAppearance: false

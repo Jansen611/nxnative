@@ -30,20 +30,7 @@ enum PrewarmUpload {
         let sha256: String
     }
 
-    private static var destination: URL? {
-        guard let endpoint = Bundle.main.object(forInfoDictionaryKey: "DMPrewarmUploadURL") as? String,
-              var url = URLComponents(string: endpoint), url.scheme == "https",
-              url.host == "script.google.com", url.path.wholeMatch(of: #/\/macros\/s\/[A-Za-z0-9_-]+\/exec/#) != nil,
-              url.user == nil, url.password == nil,
-              let title = Bundle.main.object(forInfoDictionaryKey: "DMTitleID") as? String,
-              title.wholeMatch(of: #/[0-9A-F]{16}/#) != nil,
-              let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String,
-              version.wholeMatch(of: #/[A-Za-z0-9][A-Za-z0-9 ._+()-]{0,63}/#) != nil else { return nil }
-        url.queryItems = [URLQueryItem(name: "title", value: title), URLQueryItem(name: "version", value: version)]
-        url.percentEncodedQuery = url.percentEncodedQuery?.replacingOccurrences(of: "+", with: "%2B")
-        url.fragment = nil
-        return url.url
-    }
+    private static var destination: URL? { nil }
 
     static var available: Bool { destination != nil }
     static var enabled: Bool { UserDefaults.standard.object(forKey: setting) as? Bool ?? true }

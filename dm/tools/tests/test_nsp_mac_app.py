@@ -204,6 +204,30 @@ class PackReuse(unittest.TestCase):
         self.assertIs(type(info['DMSaveSyncChoice']), int)
         self.assertEqual(info['DMSaveSyncChoice'], 1)   # the host follows DM_SAVE_SYNC_CHOICE (docs/frontends.md, The cloud saves folder)
 
+    def test_personal_prewarm_upload_policy(self):
+        self.pack()
+        info = plistlib.loads((Path(self.args.out) / 'Contents/Info.plist').read_bytes())
+        self.assertNotIn('DMPrewarmUploadURL', info)
+        self.assertEqual((Path(self.args.out) / 'Contents/Resources/dm/pso_manifest.tsv').read_bytes(),
+                 (self.tmp / 'profile/pso_manifest.tsv').read_bytes())
+        self.assert_reused()
+        self.args.prewarm_upload_url = 'https://example.invalid'
+        with self.assertRaisesRegex(SystemExit, 'disabled in this personal branch'):
+            self.pack()
+        self.assertNotIn('DMPrewarmUploadURL', plistlib.loads((Path(self.args.out) / 'Contents/Info.plist').read_bytes()))
+
+    def test_personal_prewarm_upload_arguments(self):
+        arguments = ['Game.app', '--host', 'host', '--patched', 'patched', '--romfs', 'romfs',
+                     '--msl', 'msl', '--tables', 'tables', '--font', 'font', '--title-id', TID, '--name', 'Game']
+        with mock.patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(pack_app.parse(arguments).prewarm_upload_url, '')
+            with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+                pack_app.parse(arguments + ['--prewarm-upload-url', 'https://example.invalid'])
+        with mock.patch.dict(os.environ, {'DM_PREWARM_UPLOAD_URL': 'https://example.invalid'}, clear=True):
+            with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+                pack_app.parse(arguments)
+            self.assertEqual(pack_app.parse(arguments + ['--prewarm-upload-url', '']).prewarm_upload_url, '')
+
     def test_retargeted_input_symlink_repacks(self):
         msl = self.tmp / 'msl'
         for name in ('left.metallib', 'right.metallib'): (msl / name).write_bytes(b'same library')
