@@ -8,6 +8,19 @@ import unittest
 
 
 class PointerDragTests(unittest.TestCase):
+    def test_keyboard_lifecycle(self):
+        sourceDirectory = pathlib.Path(__file__).resolve().parents[1] / 'Sources'
+        implementation = (sourceDirectory / 'DmGamepad.m').read_text()
+        active = implementation.split('void dm_gamepad_active(void)', 1)[1].split('void dm_gamepad_inactive(void)', 1)[0]
+        inactive = implementation.split('void dm_gamepad_inactive(void)', 1)[1].split('void dm_gamepad_reset(void)', 1)[0]
+        reset = implementation.split('void dm_gamepad_reset(void)', 1)[1].split('\n}', 1)[0]
+        self.assertIn('dm_switch2_active(1)', active)
+        self.assertIn('KeyboardReset();', inactive)
+        self.assertIn('dm_switch2_active(0)', inactive)
+        self.assertIn('pads_release()', inactive)
+        self.assertIn('KeyboardReset();', reset)
+        self.assertIn('pads_release()', reset)
+
     # Compile the same state machine used by UIKit without requiring an iPad.
     def test_gestures(self):
         compiler = shutil.which('clang')
@@ -379,7 +392,7 @@ int main(int argc, const char **argv) {
         pointer = implementation[implementation.index('// Keep indirect clicks'):implementation.index('- (void)recompute')]
         touches = implementation[implementation.index('- (void)pushGame {'):implementation.index('// Removing the overlay')]
         layout = (sourceDirectory / 'DmLayout.h').read_text()
-        layoutDefinition = layout[layout.index('typedef struct'):layout.index('\n\nstatic inline UIEdgeInsets')]
+        layoutDefinition = layout[layout.index('typedef struct'):layout.index('} DmLayout;') + len('} DmLayout;')]
         touchPoint = layout[layout.index('static inline CGPoint dm_game_touch_point'):layout.index('\nUIView *dm_gamepad_view')]
         source = r'''
 #import <Foundation/Foundation.h>

@@ -1,7 +1,7 @@
 """The unsigned IPA of build_ipa.sh: the game files stay out with DM_COPY_ROMFS=NO, and the executable carries the entitlements in an ad-hoc signature.
 Only the archive step and the signing step run (a stand-in app, no Xcode or game files)."""
-import os
 from pathlib import Path
+import plistlib
 import shutil
 import subprocess
 import sys
@@ -9,24 +9,16 @@ import tempfile
 import unittest
 import zipfile
 
-REPO = Path(__file__).resolve().parents[3]
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from ipa_pack_fixture import PACKING, REPO, SIGNING, run_step
+
 sys.path.insert(0, str(REPO / 'dm/games'))
 import game
 sys.path.insert(0, str(REPO / 'dm/tools'))
 import romfs_image
 
 GAME = '010015100B514000'
-SCRIPT = (REPO / 'dm/ios/tools/build_ipa.sh').read_text()
-SIGNING = SCRIPT[SCRIPT.index('# The entitlements of an unsigned IPA'):SCRIPT.index('\nP=Payload/DmIOS.app\n')]
-PACKING = SCRIPT[SCRIPT.index('\nP=Payload/DmIOS.app\n'):]
-PREAMBLE = 'set -u\nt() { :; }; die() { echo "$*" >&2; exit 1; }\ngp() { python3 "$PROFILE_TOOL" "$GAME" "$1"; }\n'
 CAN_SIGN = sys.platform == 'darwin' and shutil.which('codesign') and shutil.which('cc')
-
-
-def run_step(script, root, **extra):
-    env = {k: v for k, v in os.environ.items() if not k.startswith('DM_') and k not in ('IOS_PULL', 'AOC', 'PSO')}
-    env.update(GAME=GAME, DM=str(root / 'dm'), PROFILE_TOOL=str(REPO / 'dm/games/game.py'), **extra)
-    return subprocess.run(['/bin/bash', '-c', PREAMBLE + script], cwd=root, env=env, capture_output=True, text=True)
 
 
 class UnsignedIpaTests(unittest.TestCase):
@@ -35,6 +27,9 @@ class UnsignedIpaTests(unittest.TestCase):
         header.parent.mkdir(parents=True)
         header.write_text(game.header(game.Game(REPO / 'dm/games' / GAME)))
         for folder in ('DmIOS.app', 'shaders/b-fixture', 'romfs', 'aoc/0', 'pkg'): (root / folder).mkdir(parents=True)
+        (root / 'DmIOS.app/Info.plist').write_bytes(plistlib.dumps({}))
+        (root / 'DmIOS.app/dm').mkdir()
+        (root / 'DmIOS.app/dm/pso_manifest.tsv').write_text('prewarm fixture\n')
         (root / 'shaders/b-fixture/fixture_b.metallib').write_text('lib')
         (root / 'romfs/marker').write_text('romfs')
         (root / 'aoc/0/file').write_text('aoc')
@@ -47,7 +42,7 @@ class UnsignedIpaTests(unittest.TestCase):
             self.stand_in(root)
             (root / 'DmIOS.app/executable').write_text('app')
             if image: romfs_image.pack(root / 'romfs', root / 'RomFS.img')
-            result = run_step(PACKING, root, APP=str(root / 'DmIOS.app'), MSL_IOS=str(root / 'shaders'), MSLDIR='b-fixture', ROMFS=str(root / ('RomFS.img' if image else 'romfs')),
+            result = run_step(PACKING, root, GAME, APP=str(root / 'DmIOS.app'), MSL_IOS=str(root / 'shaders'), MSLDIR='b-fixture', ROMFS=str(root / ('RomFS.img' if image else 'romfs')),
                               AOC=str(root / 'aoc'), OUT_IPA=str(root / 'out.ipa'), O=str(root / 'pkg'), DM_APP_VERSION='1.2.1', PKG='v327680', **extra)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             with zipfile.ZipFile(root / 'out.ipa') as archive:
@@ -58,6 +53,19 @@ class UnsignedIpaTests(unittest.TestCase):
         names = self.pack()
         self.assertIn('Payload/DmIOS.app/romfs/marker', names)
         self.assertIn('Payload/DmIOS.app/aoc/0/file', names)
+        self.assertIn('Payload/DmIOS.app/dm/pso_manifest.tsv', names)
+
+    def test_packing_refuses_a_prewarm_upload_endpoint(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            self.stand_in(root)
+            (root / 'DmIOS.app/Info.plist').write_bytes(plistlib.dumps({'DMPrewarmUploadURL': ''}))
+            out = root / 'out.ipa'
+            result = run_step(PACKING, root, GAME, APP=str(root / 'DmIOS.app'), MSL_IOS=str(root / 'shaders'),
+                              MSLDIR='b-fixture', ROMFS=str(root / 'romfs'), AOC=str(root / 'aoc'), OUT_IPA=str(out), O=str(root / 'pkg'))
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn('DMPrewarmUploadURL', result.stderr)
+            self.assertFalse(out.exists())
 
     def test_copy_romfs_no_leaves_the_game_files_out_and_keeps_the_rest(self):
         names = self.pack(DM_COPY_ROMFS='NO')
@@ -82,6 +90,35 @@ class UnsignedIpaTests(unittest.TestCase):
     def test_slim_ipa_of_a_folder_has_no_identity(self):
         self.assertNotIn('Payload/DmIOS.app/romfs.id', self.pack(DM_COPY_ROMFS='NO'))
 
+    def test_supplemental_gl_library_is_packed_only_for_nvn_profile_with_gl_capture(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            self.stand_in(root)
+            (root / 'DmIOS.app/executable').write_text('app')
+            gl_dir = root / 'shaders/gl'
+            gl_dir.mkdir()
+            (gl_dir / 'gl_shaders.metallib').write_text('gl-lib')
+            (gl_dir / 'gl_shaders.tsv').write_text('0\tvs\n')
+            profile, empty_profile = root / 'profile', root / 'empty_profile'
+            profile.mkdir(); empty_profile.mkdir()
+            (profile / 'gl_capture.tsv').write_text('0.vert\n')
+            cases = [
+                ('out_gl.ipa', {'GD': str(profile)}, True),
+                ('out_no_capture.ipa', {'GD': str(empty_profile)}, False),
+                ('out_vk.ipa', {'GFXAPI': 'vulkan', 'GD': str(profile)}, False),
+            ]
+            for ipa_name, extra, expect_gl in cases:
+                with self.subTest(ipa=ipa_name, extra=extra):
+                    out = root / ipa_name
+                    result = run_step(PACKING, root, GAME, APP=str(root / 'DmIOS.app'), MSL_IOS=str(root / 'shaders'), MSLDIR='b-fixture',
+                                      ROMFS=str(root / 'romfs'), AOC=str(root / 'aoc'), OUT_IPA=str(out), O=str(root / 'pkg'),
+                                      DM_APP_VERSION='1.2.1', PKG='v327680', **extra)
+                    self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                    with zipfile.ZipFile(out) as archive:
+                        names = set(archive.namelist())
+                    self.assertEqual('Payload/DmIOS.app/msl/gl/gl_shaders.metallib' in names, expect_gl)
+                    self.assertEqual('Payload/DmIOS.app/msl/gl/gl_shaders.tsv' in names, expect_gl)
+
     @unittest.skipUnless(CAN_SIGN, 'needs macOS codesign and a C compiler')
     def test_executable_carries_the_entitlements(self):
         cases = [({}, True), ({'DM_ENTITLEMENTS': ''}, False)]
@@ -91,7 +128,7 @@ class UnsignedIpaTests(unittest.TestCase):
                 (root / 'DmIOS.app').mkdir(); (root / 'pkg').mkdir()
                 (root / 'main.c').write_text('int main(void) { return 0; }\n')
                 subprocess.run(['cc', '-o', str(root / 'DmIOS.app/DmIOS'), str(root / 'main.c')], check=True)
-                result = run_step(SIGNING, root, APP=str(root / 'DmIOS.app'), O=str(root / 'pkg'), **extra)
+                result = run_step(SIGNING, root, GAME, APP=str(root / 'DmIOS.app'), O=str(root / 'pkg'), **extra)
                 self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
                 shown = subprocess.run(['codesign', '-d', '--entitlements', '-', str(root / 'DmIOS.app/DmIOS')], capture_output=True, text=True)
                 self.assertEqual('com.apple.developer.kernel.increased-memory-limit' in shown.stdout + shown.stderr, expected)

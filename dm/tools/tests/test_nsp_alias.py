@@ -61,7 +61,7 @@ class Alias(unittest.TestCase):
         fam = {'base': self.tmp / 'base.nsp', 'updates': [(65536, self.tmp / 'upd.nsp')], 'dlc': []}
         with mock.patch.object(nsp, 'find_nx_extract', lambda *a: 'nx'), mock.patch.object(nsp, 'run', fake_run):
             self.assertIsNone(nsp.same_build(self.tmp, OTHER, fam, self.tmp / 'prod.keys', REPO, {}))
-        self.assertEqual([c for c, _ in seen], [fam['updates'][0][1], '-'])
+        self.assertEqual(seen, [(fam['updates'][0][1], ()), ('-', (4,))])
 
     def test_same_build_goes_on_past_an_unreadable_base_when_an_update_supplies_the_code(self):
         seen = []
@@ -80,7 +80,9 @@ class Alias(unittest.TestCase):
 
     def test_derived_profile_takes_the_title_and_program_ids(self):
         d = self.tmp / 'extract/v0'; nso(d / 'ExeFS/main', BID)
-        (d / 'ExeFS/main.npdm').write_bytes(b'META' + bytes(0x7c) + b'ACI0' + bytes(0xc) + struct.pack('<Q', PROGRAM) + bytes(0x20))
+        meta = bytearray(0xb8); meta[:4] = b'META'; meta[0x20:0x24] = b'ACI0'; meta[0x30:0x38] = b'1.0.0\0\0\0'
+        struct.pack_into('<II', meta, 0x70, 0x80, 0x38); meta[0x80:0x84] = b'ACI0'; struct.pack_into('<Q', meta, 0x90, PROGRAM)
+        (d / 'ExeFS/main.npdm').write_bytes(bytes(meta))
         g = game.load(f'{PROFILE:016X}'); out = self.tmp / 'derived' / g.id
         nsp.derive_profile(g, out, 'v0', d, ['main'], OTHER)
         h = game.Game(out)
@@ -98,6 +100,10 @@ class Alias(unittest.TestCase):
         self.assertEqual(game.Game(out).builds()['v0']['display'], '1.0.0')
         (d / 'control.nacp').write_bytes(bytes(0x3060) + b'2.3.4' + bytes(0x1000))   # the package's own control data comes first
         shutil.rmtree(out); self.assertEqual(nsp.derive_profile(g, out, 'v0', d, ['main']), '2.3.4')
+        (d / 'control.nacp').write_bytes(bytes(0x3060) + b'1.0.2 b723' + bytes(0x1000))   # suffixes with spaces stay intact for GetDisplayVersion, while app_version_of stays numeric
+        shutil.rmtree(out); self.assertEqual(nsp.derive_profile(g, out, 'v0', d, ['main']), '1.0.2 b723')
+        self.assertEqual(game.Game(out).builds()['v0']['display'], '1.0.2 b723')
+        self.assertEqual(nsp.app_version_of(d, d, game.Game(out), 'v0'), '1.0.2')
         (d / 'control.nacp').unlink(); nso(d / 'ExeFS/main', UPD_BID)   # a build the profile does not register, with no control data: unknown, as before
         shutil.rmtree(out); self.assertEqual(nsp.derive_profile(g, out, 'v0', d, ['main']), '?')
         self.assertEqual(game.Game(out).builds()['v0']['display'], '?')

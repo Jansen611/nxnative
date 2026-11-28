@@ -42,9 +42,14 @@ DM_RESOURCE_PSO=${DM_RESOURCE_PSO:-}   # (a project prepared before the pipeline
 echo 'Copy game resources (the first build copies the complete game; later builds sync changes)'
 # A first copy into an empty place is an APFS clone (cp -c, clonefile): the game's files take no more disk space until either side changes, where rsync wrote all of them again
 # (BotW's app is 16.5 GB; a full copy filled a Mac that had 13 GB free). cp falls back to a plain copy on a volume without clones. Later builds sync with rsync as before
-sync_dir() {   # source folder, destination folder
-    if [ ! -d "$2" ] || [ -z "$(ls -A "$2" 2>/dev/null)" ]; then mkdir -p "$2"; /bin/cp -cRp -- "$1/." "$2/" || die "copy $1 to $2"
-    else /usr/bin/rsync -a --delete -- "$1/" "$2/" || die "sync $1 to $2"; fi
+sync_dir() {   # source folder, destination folder, optional rsync flags
+    local source=$1 destination=$2
+    shift 2
+    if [ ! -d "$destination" ] || [ -z "$(ls -A "$destination" 2>/dev/null)" ]; then
+        mkdir -p "$destination"; /bin/cp -cRp -- "$source/." "$destination/" || die "copy $source to $destination"
+    else
+        /usr/bin/rsync -a --delete "$@" -- "$source/" "$destination/" || die "sync $source to $destination"
+    fi
 }
 sync_image() (   # source image, destination image
     # Keep rsync's size and whole-second mtime check on rebuilds.
@@ -70,6 +75,19 @@ sync_libraries() {   # shader libraries (a folder, or an NVN game's one file: dm
         rm -f "${2:?}/$3.img"; sync_dir "$1" "$2/$3"
     fi
 }
+sync_program_libraries() {
+    local gl="${1%/*}/gl" keep_gl=0 old
+    sync_libraries "$1" "$2" "$3"
+    if [[ "$3" = b-* ]] && [ -f "$gl/gl_shaders.metallib" ] && [ -f "$gl/gl_shaders.tsv" ]; then
+        sync_libraries "$gl" "$2" gl
+        keep_gl=1
+    fi
+    for old in "$2/"*; do
+        case "$old" in "$2/$3"|"$2/$3.img") continue;; esac
+        if [ "$keep_gl" = 1 ] && [ "$old" = "$2/gl" ]; then continue; fi
+        rm -rf "$old"
+    done
+}
 sync_romfs() {   # the RomFS (an image file or a folder), the app folder it goes in
     if [ -f "$1" ]; then
         sync_image "$1" "$2/romfs.img"
@@ -86,8 +104,7 @@ if [ -n "$DM_RESOURCE_PROGRAMS" ]; then
     while IFS=$'\t' read -r pn romfs marker shaders msldir; do
         mkdir -p "$APP/p$pn"
         sync_romfs "$romfs" "$APP/p$pn"
-        sync_libraries "$shaders" "$APP/msl/p$pn" "$msldir"
-        for old in "$APP/msl/p$pn/"*; do case "$old" in "$APP/msl/p$pn/$msldir"|"$APP/msl/p$pn/$msldir.img") ;; *) rm -rf "$old";; esac; done
+        sync_program_libraries "$shaders" "$APP/msl/p$pn" "$msldir"
         beside_romfs "$romfs" "$APP/p$pn"
         keep="$keep p$pn "
     done < <(prog_rows)
@@ -102,15 +119,17 @@ if [ "${DM_COPY_ROMFS:-YES}" = NO ]; then
         python3 -I "$resource_dm/tools/romfs_image.py" --identity "$DM_RESOURCE_ROMFS" "${DM_RESOURCE_TITLE:-}" "${DM_RESOURCE_VERSION:-}" "${DM_RESOURCE_BUILD:-}" > "$APP/romfs.id" || die "identity of $DM_RESOURCE_ROMFS"
     fi
 else sync_romfs "$DM_RESOURCE_ROMFS" "$APP"; fi
-sync_libraries "$DM_RESOURCE_SHADERS" "$APP/msl" "$DM_RESOURCE_MSLDIR"
-for old in "$APP/msl/"*; do
-    case "$old" in "$APP/msl/$DM_RESOURCE_MSLDIR"|"$APP/msl/$DM_RESOURCE_MSLDIR.img") ;; *) rm -rf "$old";; esac
-done
+sync_program_libraries "$DM_RESOURCE_SHADERS" "$APP/msl" "$DM_RESOURCE_MSLDIR"
 beside_romfs "$DM_RESOURCE_ROMFS" "$APP"
 for old in "$APP"/p[0-9]*; do [ -d "$old" ] && rm -rf "$old"; done   # the programs of a project prepared for several
 fi
 if [ -n "$DM_RESOURCE_AOC" ]; then
-    sync_dir "$DM_RESOURCE_AOC" "$APP/aoc"
+    if [ "${DM_RESOURCE_AOC_CHECKSUM:-NO}" = YES ]; then
+        # A replacement from --aoc-dir can match the old image's size and whole-second mtime.
+        sync_dir "$DM_RESOURCE_AOC" "$APP/aoc" --checksum
+    else
+        sync_dir "$DM_RESOURCE_AOC" "$APP/aoc"
+    fi
 else
     rm -rf "$APP/aoc"
 fi

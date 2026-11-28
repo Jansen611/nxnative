@@ -482,6 +482,7 @@ def frame_step(ctx):
         emit(w)
     emit(B(here(), 0xed81f4))
     fs_put(0xf75ba4, [B(0xf75ba4, start) | 0x80000000], 'screen copy into a 16:9 picture (camera photo): the screen\'s middle 16:9 band, not the whole taller screen squashed into it')
+    ctx.capabilities.add('SCREEN_ASPECT')
     CameraAspect(ctx)
     CaptureRectAspect(ctx)
 
@@ -554,8 +555,6 @@ def CameraAspect(ctx):
     ctx.emit(B(ctx.here(), site + 4 * len(original)))
     ctx.put(site, [B(site, start)] + [0xd503201f] * (len(original) - 1),
             'main camera aspect: apply and acknowledge the host ratio (state +0x200/+0x204)')
-
-
 FRAME_STEP = {'cd57b23fa4bbad65803d9788c01821ee': frame_step}
 CAPABILITIES = {'cd57b23fa4bbad65803d9788c01821ee': ('CAMERA_ASPECT',)}
 
