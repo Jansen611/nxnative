@@ -274,7 +274,7 @@ Console mode changes as on a Switch put in or taken out of its dock. While a TV 
 
 ## Prewarm contributions
 
-Apps packed with a contribution inbox show **Contribute prewarm lists automatically** in settings. It is on by default. Turn it off there or in the iPhone and iPad's in-game gear menu. When the game starts, and when the iPhone or iPad app becomes active again, the app checks the game's `pso_user.tsv` and sends a changed list with the game title ID and version to the nxnative inbox. The upload runs in the background, and maintainers review the lists before using them. [Prewarm lists](development.md#prewarm-lists)
+Apps built from this personal branch do not embed a prewarm contribution endpoint. Automatic uploads and their settings toggle are therefore unavailable; the bundled prewarm list and the device's own `pso_user.tsv` remain in use. Older apps or apps built from another branch retain their own settings. [Prewarm lists](development.md#prewarm-lists)
 
 ## TV
 

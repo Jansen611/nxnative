@@ -2,6 +2,13 @@ import XCTest
 @testable import DuoHarness
 
 final class DuoPrewarmUploadTests: XCTestCase {
+    func testUploadUnavailableEvenWithEndpoint() {
+        XCTAssertEqual(Bundle.main.object(forInfoDictionaryKey: "DMPrewarmUploadURL") as? String,
+                       "https://script.google.com/macros/s/test/exec")
+        XCTAssertFalse(PrewarmUpload.available)
+        PrewarmUpload.schedule()
+    }
+
     func testSnapshotOnlyIncludesCompletePipelineRows() throws {
         let file = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: file) }

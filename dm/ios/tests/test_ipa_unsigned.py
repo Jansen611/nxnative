@@ -1,6 +1,7 @@
 """The unsigned IPA of build_ipa.sh: the game files stay out with DM_COPY_ROMFS=NO, and the executable carries the entitlements in an ad-hoc signature.
 Only the archive step and the signing step run (a stand-in app, no Xcode or game files)."""
 from pathlib import Path
+import plistlib
 import shutil
 import subprocess
 import sys
@@ -26,6 +27,9 @@ class UnsignedIpaTests(unittest.TestCase):
         header.parent.mkdir(parents=True)
         header.write_text(game.header(game.Game(REPO / 'dm/games' / GAME)))
         for folder in ('DmIOS.app', 'shaders/b-fixture', 'romfs', 'aoc/0', 'pkg'): (root / folder).mkdir(parents=True)
+        (root / 'DmIOS.app/Info.plist').write_bytes(plistlib.dumps({}))
+        (root / 'DmIOS.app/dm').mkdir()
+        (root / 'DmIOS.app/dm/pso_manifest.tsv').write_text('prewarm fixture\n')
         (root / 'shaders/b-fixture/fixture_b.metallib').write_text('lib')
         (root / 'romfs/marker').write_text('romfs')
         (root / 'aoc/0/file').write_text('aoc')
@@ -49,6 +53,19 @@ class UnsignedIpaTests(unittest.TestCase):
         names = self.pack()
         self.assertIn('Payload/DmIOS.app/romfs/marker', names)
         self.assertIn('Payload/DmIOS.app/aoc/0/file', names)
+        self.assertIn('Payload/DmIOS.app/dm/pso_manifest.tsv', names)
+
+    def test_packing_refuses_a_prewarm_upload_endpoint(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            self.stand_in(root)
+            (root / 'DmIOS.app/Info.plist').write_bytes(plistlib.dumps({'DMPrewarmUploadURL': ''}))
+            out = root / 'out.ipa'
+            result = run_step(PACKING, root, GAME, APP=str(root / 'DmIOS.app'), MSL_IOS=str(root / 'shaders'),
+                              MSLDIR='b-fixture', ROMFS=str(root / 'romfs'), AOC=str(root / 'aoc'), OUT_IPA=str(out), O=str(root / 'pkg'))
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn('DMPrewarmUploadURL', result.stderr)
+            self.assertFalse(out.exists())
 
     def test_copy_romfs_no_leaves_the_game_files_out_and_keeps_the_rest(self):
         names = self.pack(DM_COPY_ROMFS='NO')

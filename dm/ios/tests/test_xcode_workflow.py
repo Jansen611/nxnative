@@ -12,6 +12,7 @@ import tempfile
 from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
+import zipfile
 
 REPO = Path(__file__).resolve().parents[3]
 for folder in ('scripts', 'dm/games', 'dm/tools', 'dm/ios/tools'):
@@ -20,6 +21,7 @@ import build_ipa_from_nsp as build
 import game
 import gen_resources
 import nacp
+import personal_prewarm
 import profile_guess
 import xcode_projects
 
@@ -125,6 +127,49 @@ class XcodePipelineTests(unittest.TestCase):
 
 
 class BuildEnvFileTests(unittest.TestCase):
+    def test_personal_prewarm_artifact_policy(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            plist = root / 'Info.plist'
+            ipa = root / 'test.ipa'
+            for field in (None, '', 'https://example.invalid'):
+                info = {} if field is None else {'DMPrewarmUploadURL': field}
+                plist.write_bytes(plistlib.dumps(info))
+                with zipfile.ZipFile(ipa, 'w') as archive:
+                    archive.writestr('Payload/Game.app/Info.plist', plist.read_bytes())
+                for artifact in (plist, ipa):
+                    with self.subTest(field=field, artifact=artifact.suffix):
+                        if field is None:
+                            personal_prewarm.VerifyPrewarmDisabled(artifact)
+                        else:
+                            with self.assertRaisesRegex(ValueError, 'DMPrewarmUploadURL'):
+                                personal_prewarm.VerifyPrewarmDisabled(artifact)
+            with zipfile.ZipFile(ipa, 'w') as archive:
+                archive.writestr('Payload/A.app/Info.plist', plistlib.dumps({}))
+                archive.writestr('Payload/B.app/Info.plist', plistlib.dumps({}))
+            with self.assertRaisesRegex(ValueError, 'exactly one'):
+                personal_prewarm.VerifyPrewarmDisabled(ipa)
+
+    @unittest.skipUnless(sys.platform == 'darwin', 'uses macOS PlistBuddy')
+    def test_personal_prewarm_upload_policy(self):
+        script = (REPO / 'dm/ios/tools/build_ipa.sh').read_text()
+        start = script.index('if [ -n "${DM_PREWARM_UPLOAD_URL:-}" ]')
+        policy = script[start:script.index('# DMCommit / DMChain:', start)]
+        for endpoint, field, succeeds in ((None, None, True), ('', None, True),
+                                           ('https://example.invalid', None, False),
+                                           (None, '', False), (None, 'https://example.invalid', False)):
+            with self.subTest(endpoint=endpoint, field=field), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                (root / 'Gen').mkdir()
+                info = {} if field is None else {'DMPrewarmUploadURL': field}
+                (root / 'Gen/Info.plist').write_bytes(plistlib.dumps(info))
+                environment = dict(os.environ)
+                environment.pop('DM_PREWARM_UPLOAD_URL', None)
+                if endpoint is not None: environment['DM_PREWARM_UPLOAD_URL'] = endpoint
+                result = subprocess.run(['/bin/bash', '-c', 'set -u; die() { echo "$*" >&2; exit 1; };\n' + policy],
+                                        cwd=root, env=environment, capture_output=True, text=True)
+                self.assertEqual(result.returncode == 0, succeeds, result.stderr)
+
     def test_no_motion_keeps_the_env_files_switches(self):
         with tempfile.TemporaryDirectory() as temporary:
             work = Path(temporary)

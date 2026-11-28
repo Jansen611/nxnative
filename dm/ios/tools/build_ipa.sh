@@ -214,12 +214,9 @@ fi
 [ "${DM_COPY_ROMFS:-YES}" != NO ] || [ "$PREPARE_XCODE" != YES ] || echo "DM_COPY_ROMFS = NO" >> Gen/dm.xcconfig
 xcodegen generate -q > /dev/null || die "xcodegen"
 plutil -replace DMTitleID -string "$GAME" -- Gen/Info.plist || die "DMTitleID"
-PREWARM_URL=${DM_PREWARM_UPLOAD_URL-}
-if [ -z "${DM_PREWARM_UPLOAD_URL+x}" ] && [ -f "$DM/services/prewarm-inbox/endpoint.txt" ]; then
-  PREWARM_URL=$(<"$DM/services/prewarm-inbox/endpoint.txt")
-fi
-if [ "$GFXAPI" = nvn ] && [ -n "$PREWARM_URL" ]; then
-  plutil -replace DMPrewarmUploadURL -string "$PREWARM_URL" -- Gen/Info.plist || die "DMPrewarmUploadURL"
+if [ -n "${DM_PREWARM_UPLOAD_URL:-}" ]; then die "automatic prewarm uploads are disabled in this personal branch"; fi
+if /usr/libexec/PlistBuddy -c 'Print :DMPrewarmUploadURL' Gen/Info.plist >/dev/null 2>&1; then
+  die "Gen/Info.plist must not contain DMPrewarmUploadURL"
 fi
 # DMCommit / DMChain: the checkout that built the app (+dirty with uncommitted changes to tracked files) and the shader chain it carries, which the host logs at start (main.c).
 # plutil -replace inserts or overwrites (and sets the type), so a project.yml that already defines these keys does not abort the prepare.
@@ -270,6 +267,7 @@ if [ -n "${DM_ENTITLEMENTS-default}" ]; then
   t "entitlements in the executable's ad-hoc signature (the install tool re-signs and keeps them)"
 fi
 P=Payload/DmIOS.app
+"${DM_PYTHON:-python3}" "$DM/tools/personal_prewarm.py" "$APP/Info.plist" || die "prewarm upload policy"
 SKIP=(--skip $P/_CodeSignature --skip $P/embedded.mobileprovision --skip $P/msl --skip $P/aoc --skip $P/romfs --skip $P/romfs.img --skip $P/romfs.id --skip $P/html --skip $P/jit --skip $P/romfs_programs)
 if [ -n "${PROGRAMS_TSV:-}" ]; then   # each program's shader libraries, RomFS, offline HTML pages and nn::jit image under its own folder
   [ "${DM_COPY_ROMFS:-YES}" != NO ] || die "DM_COPY_ROMFS=NO: a game of several programs keeps its programs' files in the app"
@@ -311,4 +309,5 @@ ZS=$(gp zip_store); [ -z "${PROGRAMS_TSV:-}" ] || ZS=$(for g in $(prog_rows | cu
 PACK_OPTS=(--store "$ZS"); [ -n "${PSO:-}" ] || [ "${IOS_PULL:-1}" = 1 ] || PACK_OPTS+=(--skip-suffix _bp.metallib)
 [ "${DM_SHADER_FILES:-0}" != 1 ] || PACK_OPTS+=(--shader-files)
 "${DM_PYTHON:-python3}" tools/pack_ipa.py "$OUT_IPA" "${PACK_OPTS[@]}" "${SKIP[@]}" "${MAPS[@]}" || die "pack_ipa"
+"${DM_PYTHON:-python3}" "$DM/tools/personal_prewarm.py" "$OUT_IPA" || die "prewarm upload policy in IPA"
 t "done: $OUT_IPA ($(du -h "$OUT_IPA" | cut -f1))"

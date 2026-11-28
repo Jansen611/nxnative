@@ -1,6 +1,7 @@
 """Pack tiny shader fixtures through build_ipa.sh's archive step, without Xcode or game files."""
 import os
 from pathlib import Path
+import plistlib
 import subprocess
 import sys
 import tempfile
@@ -45,8 +46,10 @@ class ProfilePackTests(unittest.TestCase):
                     (shaders / 'b-fixture' / name).write_text(name)
                 if packed: self.assertTrue(shader_lib.pack(shaders / 'b-fixture'))
                 (app / 'executable').write_text('app')
+                (app / 'Info.plist').write_bytes(plistlib.dumps({}))
                 (romfs / 'marker').write_text('romfs')
                 (root / 'tools').symlink_to(REPO / 'dm/ios/tools', target_is_directory=True)
+                (dm / 'tools').symlink_to(REPO / 'dm/tools', target_is_directory=True)
                 out = root / 'fixture.ipa'
                 extra = dict(APP=str(app), MSL_IOS=str(shaders), MSLDIR='b-fixture',
                              AOC='', ROMFS=str(romfs), OUT_IPA=str(out))

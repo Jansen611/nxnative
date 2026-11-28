@@ -20,6 +20,7 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parent / 'tools'))
 import nso_syms
+import personal_prewarm
 import romfs as rfs
 import shader_lib
 import vol_space   # the space a build may write, with what APFS frees on demand
@@ -117,6 +118,8 @@ def make_icns(jpg, out):   # the game's icon (256x256 JPEG) at every size an .ic
 
 
 def info_plist(a, minos, icon):
+    if getattr(a, 'prewarm_upload_url', None):
+        raise SystemExit('automatic prewarm uploads are disabled in this personal branch')
     # LSSupportsGameMode off: macOS's Game Mode holds the GPU at its lowest clock while it is busy (docs/reference/frame-rate.md, macOS Game Mode holds the GPU at its lowest clock)
     p = {'CFBundleName': a.name, 'CFBundleDisplayName': a.name, 'CFBundleIdentifier': a.bundle_id or f'org.nxnative.{a.title_id.lower()}',
          'CFBundleVersion': a.version or '1.0', 'CFBundleShortVersionString': a.version or '1.0', 'CFBundlePackageType': 'APPL', 'CFBundleExecutable': EXE,
@@ -124,8 +127,6 @@ def info_plist(a, minos, icon):
          'NSBluetoothAlwaysUsageDescription': 'Connect Switch 2 Joy-Con and Pro Controllers over Bluetooth.',
          'LSApplicationCategoryType': a.category or 'public.app-category.games', 'LSSupportsGameMode': False, 'DMTitleID': a.title_id.upper(), 'DMRomfsMarker': a.marker or '', 'DMLanguage': a.lang or 'en-US', 'DMSaveSyncChoice': 1}
     if icon: p['CFBundleIconFile'] = 'AppIcon'
-    if getattr(a, 'prewarm_upload_url', None) and Path(a.msl).name not in ('vk', 'gl'):
-        p['DMPrewarmUploadURL'] = a.prewarm_upload_url
     if a.settings:
         listed = json.loads(Path(a.settings).read_text(encoding='utf-8'))['settings']
         lang = next((s['default'] for s in listed if s['env'] == 'DM_LANG'), None)
@@ -416,6 +417,8 @@ def copy_runtime(python, sources, destination):
 
 
 def pack(a):
+    if getattr(a, 'prewarm_upload_url', None):
+        raise SystemExit('automatic prewarm uploads are disabled in this personal branch')
     out = Path(a.out).resolve()
     if out.suffix != '.app': raise SystemExit(f'the output must end in .app: {out}')
     key_file, set_aside = out.with_name(out.name + '.key'), out.with_name(out.name + '.key.replaced')
@@ -469,7 +472,7 @@ def pack(a):
         if not codesign: raise SystemExit('codesign is not available')
         codesign = Path(codesign).resolve()
         minos = min_os(a.host)
-        sources = [Path(__file__).resolve(), HERE / 'launcher.c', HERE.parent / 'host/romfs_image.h', HERE.parent / 'host/save_sync.c', HERE.parent / 'host/save_sync.h', HERE.parent / 'host/save_sync_apple.m', HERE.parent / 'tools/romfs.py', HERE.parent / 'tools/nso_syms.py'] + swift_sources()
+        sources = [Path(__file__).resolve(), Path(personal_prewarm.__file__).resolve(), HERE / 'launcher.c', HERE.parent / 'host/romfs_image.h', HERE.parent / 'host/save_sync.c', HERE.parent / 'host/save_sync.h', HERE.parent / 'host/save_sync_apple.m', HERE.parent / 'tools/romfs.py', HERE.parent / 'tools/nso_syms.py'] + swift_sources()
         large = {*msls, *pso, *(p for x in programs for p in x[5])}   # the shader libraries and pipeline archives (13.5 GB for Ocarina of Time): by stat, as the RomFS trees below
         def tree(p):   # a folder's entries; a RomFS image's one row as a large file's (as_packed)
             rows = inventory(Path(p))
@@ -487,6 +490,7 @@ def pack(a):
             now = inventory(out)
             rows = lambda inv: {r[0]: r[1:] for r in inv if isinstance(r, list) and r and isinstance(r[0], str)}
             if previous['app'] == now or (len(rows(previous['app'])) == len(previous['app']) and as_recorded(rows(previous['app']), rows(now), out, previous.get('seals'))):
+                personal_prewarm.VerifyPrewarmDisabled(out / 'Contents/Info.plist')
                 if previous['app'] != now or any(last[k].get('ctime') != v for k, v in moved.items()):   # change times macOS moved (see Data bundles, as_packed), the bytes as packed: recorded, so that the next pack reads none of them again
                     with contextlib.suppress(OSError): write_key(key_file, dict(previous, app=now, sources={k: dict(v, ctime=moved[k]) if k in moved else v for k, v in last.items()}))
                 print(f'app: {out}, reused (inputs unchanged)', flush=True)
@@ -581,6 +585,7 @@ def pack(a):
     (c / 'Info.plist').write_bytes(plistlib.dumps(info))
     (c / 'PkgInfo').write_text('APPL????')
     step(f'signing ({"ad-hoc" if a.sign == "-" else a.sign})'); sign(tmp, a.sign, codesign, fresh)   # a new data bundle is read whole once; the app's signature then takes its hash
+    personal_prewarm.VerifyPrewarmDisabled(c / 'Info.plist')
     had_old = out.exists()
     replace_app(tmp, out)
     # The large inputs as the keys took them, each with the SHA-256 of its bytes where one is known (as_packed): the app's copy's for a clone (the RomFS image, the pipeline
@@ -622,13 +627,14 @@ def parse(argv):
     ap.add_argument('--env-file', help='environment switches baked in (Resources/dm/env.txt)')
     ap.add_argument('--settings', help='the game\'s launcher settings (dm/games/settings.py output; Resources/dm/launcher.json, which the Mac front end reads)')
     ap.add_argument('--title-id', required=True); ap.add_argument('--name', required=True)
-    endpoint = HERE.parent / 'services/prewarm-inbox/endpoint.txt'
-    ap.add_argument('--prewarm-upload-url', default=os.environ.get('DM_PREWARM_UPLOAD_URL',
-                    endpoint.read_text(encoding='utf-8').strip() if endpoint.is_file() else None))
+    ap.add_argument('--prewarm-upload-url', default=os.environ.get('DM_PREWARM_UPLOAD_URL', ''))
     ap.add_argument('--version'); ap.add_argument('--bundle-id'); ap.add_argument('--category'); ap.add_argument('--lang'); ap.add_argument('--marker', help='the profile\'s romfs_marker')
     ap.add_argument('--icon', help='the game icon (icon.jpg from the control data)')
     ap.add_argument('--sign', default='-', help='codesign identity (default: - = ad-hoc)')
-    return ap.parse_args(argv)
+    options = ap.parse_args(argv)
+    if options.prewarm_upload_url:
+        ap.error('automatic prewarm uploads are disabled in this personal branch')
+    return options
 
 
 if __name__ == '__main__':
