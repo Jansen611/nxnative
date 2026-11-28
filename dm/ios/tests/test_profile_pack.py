@@ -1,6 +1,7 @@
 """Pack tiny shader fixtures through build_ipa.sh's archive step, without Xcode or game files."""
 import os
 from pathlib import Path
+import plistlib
 import subprocess
 import sys
 import tempfile
@@ -8,7 +9,9 @@ import unittest
 from unittest.mock import patch
 import zipfile
 
-REPO = Path(__file__).resolve().parents[3]
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from ipa_pack_fixture import PACKING, REPO, run_step
+
 sys.path.insert(0, str(REPO / 'dm/games'))
 import game
 import settings
@@ -32,6 +35,9 @@ class ProfilePackTests(unittest.TestCase):
                     fixups.write_text('')
                     rows = settings.build('01002B00111A2000', patched, patched / 'control.nacp')['settings']
                     self.assertFalse(any(row['env'] == 'DM_SCREEN_SIZE' for row in rows))
+                    rows = settings.build('01007EF00011E000', patched, patched / 'control.nacp')['settings']
+                    self.assertFalse(any(row['env'] == 'DM_SCREEN_ASPECT' for row in rows))
+                    fixups.write_text('# SCREEN_ASPECT\t1\n')
                     rows = settings.build('01007EF00011E000', patched, patched / 'control.nacp')['settings']
                     self.assertTrue(any(row['env'] == 'DM_SCREEN_ASPECT' for row in rows))
                     self.assertFalse(any(row['env'] == 'DM_SCREEN_SIZE' for row in rows))
@@ -64,22 +70,19 @@ class ProfilePackTests(unittest.TestCase):
                     (shaders / 'b-fixture' / name).write_text(name)
                 if packed: self.assertTrue(shader_lib.pack(shaders / 'b-fixture'))
                 (app / 'executable').write_text('app')
+                (app / 'Info.plist').write_bytes(plistlib.dumps({}))
                 (romfs / 'marker').write_text('romfs')
                 (root / 'tools').symlink_to(REPO / 'dm/ios/tools', target_is_directory=True)
+                (dm / 'tools').symlink_to(REPO / 'dm/tools', target_is_directory=True)
                 out = root / 'fixture.ipa'
-                env = {k: v for k, v in os.environ.items() if k not in ('IOS_PULL', 'DM_GAMES_DIR', 'DM_GAMES_FIRST')}
-                env.update(GAME=gid, DM=str(dm), APP=str(app), MSL_IOS=str(shaders), MSLDIR='b-fixture',
-                           AOC='', ROMFS=str(romfs), OUT_IPA=str(out), PROFILE_TOOL=str(REPO / 'dm/games/game.py'))
-                if override is not None: env['IOS_PULL'] = override
+                extra = dict(APP=str(app), MSL_IOS=str(shaders), MSLDIR='b-fixture',
+                             AOC='', ROMFS=str(romfs), OUT_IPA=str(out))
+                if override is not None: extra['IOS_PULL'] = override
                 if with_pso:
                     pso = root / 'pso'; pso.mkdir(); (pso / 'prebuilt.tsv').write_text('fixture')
-                    env['PSO'] = str(pso)
+                    extra['PSO'] = str(pso)
                 # Exercise the actual archive step; only the preceding Xcode build is bypassed.
-                script = (REPO / 'dm/ios/tools/build_ipa.sh').read_text()
-                packing = script[script.index('\nP=Payload/DmIOS.app\n'):]
-                result = subprocess.run(['/bin/bash', '-c', 'set -u\nt() { :; }; die() { echo "$*" >&2; exit 1; }\n'
-                                         'gp() { python3 "$PROFILE_TOOL" "$GAME" "$1"; }\n' + packing],
-                                        cwd=root, env=env, capture_output=True, text=True)
+                result = run_step(PACKING, root, gid, **extra)
                 self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
                 with zipfile.ZipFile(out) as archive:
                     names = set(archive.namelist())

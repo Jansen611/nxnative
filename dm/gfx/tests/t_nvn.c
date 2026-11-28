@@ -14,6 +14,10 @@ void nvn_present_config(int hz, int display_mode);
 #include <unistd.h>
 #include <sys/wait.h>
 uint64_t now_ns(void) { return clock_gettime_nsec_np(CLOCK_UPTIME_RAW); }   // the host's clock (hle_os.c: Mach absolute time), which Metal's timestamps are on
+static _Atomic uint64_t g_test_focus_in;
+uint64_t dm_focus_in_since(void) { return atomic_load(&g_test_focus_in); }   // overrides nvn_mtl.m's weak stub for fstep_tick settle-alignment tests
+static char g_test_offscreen_native;
+int dm_native_window_offscreen(const void *native) { return native == &g_test_offscreen_native; }   // overrides t_host_stubs.c's weak stub to exercise WindowBuilderSetNativeWindow -> WindowInitialize
 
 static int g_fail, g_n;
 #define EXPECT(name, want, got) do { long long w_ = (long long)(want), g_ = (long long)(got); g_n++;                 \
@@ -371,6 +375,21 @@ int main(void) {
       EXPECT("stub state takes precedence over env",60,fps_present_cap());
       *(uint32_t *)(state+4)=1;
       EXPECT("the state page's movie flag is the host's copy, not read for the cap",60,fps_present_cap());
+      // a page in ticks of 1/120 s (+0x38 120, a FRAME_STEP_120 stub; headless: no window): 40 fps is 3 ticks, 25 ms; 60 and 30 are 2 and 4 ticks
+      uint32_t unit=120;memcpy(state+FSTEP_UNIT_OFF,&unit,4);nvn_present_config(120,0);
+      cap=40;memcpy(state,&cap,4);
+      EXPECT("ticks 40: present cap",40,fps_present_cap());
+      EXPECT("ticks 40: three ticks a frame",3,present_itv(&w));
+      EXPECT("ticks 40: period ns",25000000,present_period(&w));
+      EXPECT("ticks 40: display-link target",40,nvn_game_fps());
+      EXPECT("ticks 40: graphics layer's target (statistics, link)",40,mtl_fps_target());
+      cap=60;memcpy(state,&cap,4);
+      EXPECT("ticks 60: two ticks a frame",2,present_itv(&w));
+      EXPECT("ticks 60: period ns",16666666,present_period(&w));
+      EXPECT("ticks 60: graphics layer's target",60,mtl_fps_target());
+      cap=30;memcpy(state,&cap,4);
+      EXPECT("ticks 30: four ticks a frame",4,present_itv(&w));
+      EXPECT("ticks 30: graphics layer's target",30,mtl_fps_target());
       dm_fps_state=NULL;unsetenv("DM_FPS_TARGET");g_present_cap=-1;nvn_present_config(0,0);
     }
     // No frame step page and no engine limiter the host writes (a main the profile's
@@ -401,6 +420,42 @@ int main(void) {
       nvn_present_config(-1,0);setenv("DM_PRESENT_INTERVAL","display",1);setenv("DM_FPS_TARGET","30",1);g_present_cap=-1;
       EXPECT("the cap asked for before the window's first interval: display mode from the environment",30,fps_present_cap());
       unsetenv("DM_PRESENT_INTERVAL");unsetenv("DM_FPS_TARGET");g_present_cap=-1;g_engine_stub=1;nvn_present_config(0,0);
+    }
+    // Frame step settle alignment in fstep_tick: startup focus/window events do not count as stalls, a pause between AcquireTexture and Present lands on the frame whose
+    // [prev, st] span actually crosses the pause (paying back 0 vsyncs), and back-to-back window events across Acquire/Present each land on their own frame
+    {
+      win_t w = {.interval = 1}; _Alignas(8) uint8_t state[64] = {0}; float cap = 60; memcpy(state, &cap, 4);
+      dm_fps_state = state; g_fs = (nvn_fstep){0}; g_fg = (nvn_fgpu){0}; atomic_store(&g_fs_k, 0);
+      const uint64_t vs = 16666667ull; uint64_t t = 1000000000ull;
+      // Startup events before frame 1's acquire are absorbed without triggering a stall
+      atomic_store(&g_test_focus_in, t - 5000000ull); dm_fstep_settle();
+      g_fs_start = t; g_fs_focus_at = dm_focus_in_since(); g_fs_settle_at = atomic_load(&g_fs_settle_seq);
+      w.presents = 1; fstep_tick(&w, 60);
+      t += vs; g_fs_start = t; g_fs_focus_at = dm_focus_in_since(); g_fs_settle_at = atomic_load(&g_fs_settle_seq);
+      w.presents = 2; fstep_tick(&w, 60);
+      EXPECT("fstep settle: startup events cause no stall", 0, g_fs.stalls);
+      // Pause between Acquire 3 (t + vs) and Present 3: focus returns before Present 3, while Frame 3's [prev, st] is only 1 vsync
+      t += vs; g_fs_start = t; g_fs_focus_at = dm_focus_in_since(); g_fs_settle_at = atomic_load(&g_fs_settle_seq);
+      atomic_store(&g_test_focus_in, t + 2000000000ull);   // focus returns after 2 s pause, before Present 3 calls fstep_tick
+      w.presents = 3; fstep_tick(&w, 60);
+      EXPECT("fstep settle: mid-frame pause not consumed on prior frame", 0, g_fs.stalls);
+      // Acquire 4 happens after the 2 s pause: Frame 4 spans the pause and drops 100% of its debt
+      t += 2000000000ull + vs; g_fs_start = t; g_fs_focus_at = dm_focus_in_since(); g_fs_settle_at = atomic_load(&g_fs_settle_seq);
+      w.presents = 4; fstep_tick(&w, 60);
+      EXPECT("fstep settle: pause frame gets settle (stalls=1)", 1, g_fs.stalls);
+      EXPECT("fstep settle: pause frame pays nothing back", 0, g_fs.paid);
+      EXPECT("fstep settle: pause debt dropped (debt < 1)", 1, g_fs.debt < 1.0 && g_fs.dropped >= 119.0);
+      // Window event before Acquire 5 AND a second event between Acquire 5 and Present 5: both land on their own frames
+      dm_fstep_settle();
+      t += vs; g_fs_start = t; g_fs_focus_at = dm_focus_in_since(); g_fs_settle_at = atomic_load(&g_fs_settle_seq);
+      dm_fstep_settle();
+      w.presents = 5; fstep_tick(&w, 60);
+      EXPECT("fstep settle: event before acquire lands on frame 5", 2, g_fs.stalls);
+      t += vs; g_fs_start = t; g_fs_focus_at = dm_focus_in_since(); g_fs_settle_at = atomic_load(&g_fs_settle_seq);
+      w.presents = 6; fstep_tick(&w, 60);
+      EXPECT("fstep settle: event after acquire lands on frame 6", 3, g_fs.stalls);
+      dm_fps_state = NULL; g_fs = (nvn_fstep){0}; g_fg = (nvn_fgpu){0}; atomic_store(&g_fs_k, 0);
+      atomic_store(&g_test_focus_in, 0); g_fs_start = g_fs_wait = 0;
     }
     crash_install();   // the same SIGSEGV / SIGBUS handling as production (the page-fault hook is dispatched from within it)
     // 1. Bootstrap address lookup: bootstrap gets GetProcAddress, then uses it to get all the names
@@ -1368,8 +1423,287 @@ int main(void) {
         P(nvnQueuePresentTexture)(&q, &win, idx[f]);
     }
     EXPECT("swapchain rotates 0,1,0,1", 0x0101, idx[0] << 12 | idx[1] << 8 | idx[2] << 4 | idx[3]);
-    EXPECT("sync signaled after acquire (0)", 0, P(nvnSyncWait)(&s2, 0));
+    NVNsyncWaitResult awr = P(nvnSyncWait)(&s2, UINT64_MAX);
+    EXPECT("blocking wait on deferred acquire sync succeeds (0 or 1)", 1, awr == NVN_SYNC_WAIT_RESULT_ALREADY_SIGNALED || awr == NVN_SYNC_WAIT_RESULT_CONDITION_SATISFIED);
+    EXPECT("sync already signaled after acquire wait completes (0)", 0, P(nvnSyncWait)(&s2, 0));
     EXPECT("Barrier count = 4 frames × 5", 20, nvn_slot[bi].cnt - barriers0);
+
+    // 6a. Deferred acquire sync edge cases:
+    // (1) Present enqueued for the acquired texture behind an unsignaled GPU event BEFORE CPU nvnSyncWait(s) must not deadlock (Super Mario Bros. Wonder Switch 2 Edition's parallel present thread)
+    // (2) Queue-only nvnQueueWaitSync without CPU nvnSyncWait, followed by next acquire drain
+    // (3) Re-fencing and finalizing a pending deferred acquire sync, and finalizing the window with a pending acquire
+    {
+        NVNeventBuilder eb; NVNevent ev;
+        static uint32_t ev_mem[4096] __attribute__((aligned(16384)));
+        NVNmemoryPoolBuilder epb; NVNmemoryPool ep;
+        P(nvnMemoryPoolBuilderSetDefaults)(&epb); P(nvnMemoryPoolBuilderSetStorage)(&epb, ev_mem, sizeof ev_mem);
+        P(nvnMemoryPoolInitialize)(&ep, &epb);
+        P(nvnEventBuilderSetDefaults)(&eb); P(nvnEventBuilderSetStorage)(&eb, &ep, 0);
+        P(nvnEventInitialize)(&ev, &eb);
+        ev_mem[0] = 0;
+
+        NVNsync s_acq; P(nvnSyncInitialize)(&s_acq, &dev);
+        int aidx = -1;
+        P(nvnWindowAcquireTexture)(&win, &s_acq, &aidx);
+        P(nvnCommandBufferBeginRecording)(&cb);
+        P(nvnCommandBufferWaitEvent)(&cb, &ev, NVN_EVENT_WAIT_MODE_EQUAL, 1);
+        NVNcommandHandle h_ev = P(nvnCommandBufferEndRecording)(&cb);
+        P(nvnQueueSubmitCommands)(&q, 1, &h_ev);
+        P(nvnQueuePresentTexture)(&q, &win, aidx);
+        // Queue is now blocked on ev == 1 before aidx's new present can publish; SyncWait must only wait on aidx's PREVIOUS present
+        NVNsyncWaitResult r_par = P(nvnSyncWait)(&s_acq, 5000000000ull);
+        EXPECT("deferred acquire SyncWait does not deadlock on a concurrent present of the same slot", 1, r_par == NVN_SYNC_WAIT_RESULT_ALREADY_SIGNALED || r_par == NVN_SYNC_WAIT_RESULT_CONDITION_SATISFIED);
+        P(nvnEventSignal)(&ev, NVN_EVENT_SIGNAL_MODE_WRITE, 1);
+        P(nvnQueueFinish)(&q);
+
+        // An image comes back once the present after its last one has run (hle_nvn.c win_t.next_ticket):
+        // (a) 2-image CPU SyncWait (including zero-timeout poll): acquiring A again waits for B's held present
+        // (b) Distinct-queue nvnQueueWaitSync: q2 waiting on A's acquire sync parks until q's held present of B publishes
+        // (c) 3-image swapchain: acquiring 0 waits on 1 (not held 2) for both SyncWait and q2 QueueWaitSync; acquiring 1 waits on held 2
+        // (d) nvnWindowSetNumActiveTextures 3->2 and 2->3 preserve each image's successor present
+        {
+            NVNqueueBuilder qb2; NVNqueue q2;
+            P(nvnQueueBuilderSetDevice)(&qb2, &dev); P(nvnQueueBuilderSetDefaults)(&qb2);
+            size_t qsz2 = P(nvnQueueBuilderGetQueueMemorySize)(&qb2);
+            void *qmem2 = aligned_alloc(4096, qsz2);
+            P(nvnQueueBuilderSetQueueMemory)(&qb2, qmem2, qsz2);
+            EXPECT("distinct queue q2 initializes", 1, P(nvnQueueInitialize)(&q2, &qb2));
+            NVNsync s_q2; P(nvnSyncInitialize)(&s_q2, &dev);
+            typedef void (*set_b)(NVNwindowBuilder *, int);
+            typedef void (*set_w)(NVNwindow *, int);
+
+            // (a) 2-image CPU SyncWait + zero-timeout poll
+            ev_mem[0] = 0;
+            int ia = -1, ib = -1, ic = -1;
+            P(nvnWindowAcquireTexture)(&win, &s_acq, &ia); P(nvnSyncWait)(&s_acq, UINT64_MAX);
+            P(nvnQueuePresentTexture)(&q, &win, ia);
+            P(nvnWindowAcquireTexture)(&win, &s_acq, &ib); P(nvnSyncWait)(&s_acq, UINT64_MAX);
+            P(nvnCommandBufferBeginRecording)(&cb);
+            P(nvnCommandBufferWaitEvent)(&cb, &ev, NVN_EVENT_WAIT_MODE_EQUAL, 1);
+            NVNcommandHandle h_hold = P(nvnCommandBufferEndRecording)(&cb);
+            P(nvnQueueSubmitCommands)(&q, 1, &h_hold);
+            P(nvnQueuePresentTexture)(&q, &win, ib);
+            P(nvnWindowAcquireTexture)(&win, &s_acq, &ic);
+            EXPECT("2-image: image presented before held one comes back next", ia, ic);
+            EXPECT("2-image: zero-timeout SyncWait expires while successor present is held", NVN_SYNC_WAIT_RESULT_TIMEOUT_EXPIRED, P(nvnSyncWait)(&s_acq, 0));
+            EXPECT("2-image: finite SyncWait expires while successor present is held", NVN_SYNC_WAIT_RESULT_TIMEOUT_EXPIRED, P(nvnSyncWait)(&s_acq, 200000000ull));
+            P(nvnEventSignal)(&ev, NVN_EVENT_SIGNAL_MODE_WRITE, 1);
+            NVNsyncWaitResult r_next = P(nvnSyncWait)(&s_acq, 5000000000ull);
+            EXPECT("2-image: SyncWait signals once held successor present runs", 1, r_next == NVN_SYNC_WAIT_RESULT_ALREADY_SIGNALED || r_next == NVN_SYNC_WAIT_RESULT_CONDITION_SATISFIED);
+            EXPECT("2-image: repeat zero-timeout SyncWait is already signaled", NVN_SYNC_WAIT_RESULT_ALREADY_SIGNALED, P(nvnSyncWait)(&s_acq, 0));
+            P(nvnQueuePresentTexture)(&q, &win, ic);
+            P(nvnQueueFinish)(&q);
+
+            // (b) 2-image distinct-queue nvnQueueWaitSync waits on successor present
+            ev_mem[0] = 0;
+            P(nvnWindowAcquireTexture)(&win, &s_acq, &ia); P(nvnSyncWait)(&s_acq, UINT64_MAX);
+            P(nvnQueuePresentTexture)(&q, &win, ia);
+            P(nvnQueueFinish)(&q);   // ia's own present is already published and finished
+            P(nvnWindowAcquireTexture)(&win, &s_acq, &ib); P(nvnSyncWait)(&s_acq, UINT64_MAX);
+            P(nvnCommandBufferBeginRecording)(&cb);
+            P(nvnCommandBufferWaitEvent)(&cb, &ev, NVN_EVENT_WAIT_MODE_EQUAL, 1);
+            h_hold = P(nvnCommandBufferEndRecording)(&cb);
+            P(nvnQueueSubmitCommands)(&q, 1, &h_hold);
+            P(nvnQueuePresentTexture)(&q, &win, ib);
+            P(nvnWindowAcquireTexture)(&win, &s_acq, &ic);
+            EXPECT("2-image queue wait: reacquires image A", ia, ic);
+            P(nvnQueueWaitSync)(&q2, &s_acq);
+            P(nvnQueueFenceSync)(&q2, &s_q2, NVN_SYNC_CONDITION_ALL_GPU_COMMANDS_COMPLETE, 0);
+            EXPECT("distinct queue q2 parks on successor present while ev==0", NVN_SYNC_WAIT_RESULT_TIMEOUT_EXPIRED, P(nvnSyncWait)(&s_q2, 200000000ull));
+            P(nvnEventSignal)(&ev, NVN_EVENT_SIGNAL_MODE_WRITE, 1);
+            NVNsyncWaitResult r_q2 = P(nvnSyncWait)(&s_q2, 5000000000ull);
+            EXPECT("distinct queue q2 proceeds once held successor present publishes", 1, r_q2 == NVN_SYNC_WAIT_RESULT_ALREADY_SIGNALED || r_q2 == NVN_SYNC_WAIT_RESULT_CONDITION_SATISFIED);
+            r_next = P(nvnSyncWait)(&s_acq, 5000000000ull);
+            EXPECT("2-image queue wait: acquire sync also signals", 1, r_next == NVN_SYNC_WAIT_RESULT_ALREADY_SIGNALED || r_next == NVN_SYNC_WAIT_RESULT_CONDITION_SATISFIED);
+            P(nvnQueuePresentTexture)(&q, &win, ic);
+            P(nvnQueueFinish)(&q); P(nvnQueueFinish)(&q2);
+
+            // (c) 3-image swapchain: image 0 depends on present 1 (not held present 2); image 1 depends on held present 2
+            NVNwindowBuilder wb3; NVNwindow w3;
+            NVNtexture *sc3[3] = {&sc[0], &sc[1], &sc[0]};
+            P(nvnWindowBuilderSetDevice)(&wb3, &dev); P(nvnWindowBuilderSetDefaults)(&wb3);
+            P(nvnWindowBuilderSetTextures)(&wb3, 3, sc3);
+            EXPECT("3-image window initializes", 1, P(nvnWindowInitialize)(&w3, &wb3));
+            int i0 = -1, i1 = -1, i2 = -1, r0 = -1, r1 = -1;
+            ev_mem[0] = 0;
+            P(nvnWindowAcquireTexture)(&w3, &s_acq, &i0); P(nvnSyncWait)(&s_acq, UINT64_MAX);
+            P(nvnQueuePresentTexture)(&q, &w3, i0);
+            P(nvnWindowAcquireTexture)(&w3, &s_acq, &i1); P(nvnSyncWait)(&s_acq, UINT64_MAX);
+            P(nvnQueuePresentTexture)(&q, &w3, i1);
+            P(nvnQueueFinish)(&q);   // presents 0 and 1 are done
+            P(nvnWindowAcquireTexture)(&w3, &s_acq, &i2); P(nvnSyncWait)(&s_acq, UINT64_MAX);
+            P(nvnCommandBufferBeginRecording)(&cb);
+            P(nvnCommandBufferWaitEvent)(&cb, &ev, NVN_EVENT_WAIT_MODE_EQUAL, 1);
+            h_hold = P(nvnCommandBufferEndRecording)(&cb);
+            P(nvnQueueSubmitCommands)(&q, 1, &h_hold);
+            P(nvnQueuePresentTexture)(&q, &w3, i2);
+            // Acquiring image 0 waits on present 1 (already done), NOT held present 2
+            P(nvnWindowAcquireTexture)(&w3, &s_acq, &r0);
+            EXPECT("3-image: fourth acquire returns image 0", i0, r0);
+            P(nvnQueueWaitSync)(&q2, &s_acq);
+            P(nvnQueueFenceSync)(&q2, &s_q2, NVN_SYNC_CONDITION_ALL_GPU_COMMANDS_COMPLETE, 0);
+            r_q2 = P(nvnSyncWait)(&s_q2, 2000000000ull);
+            EXPECT("3-image: q2 passes image 0 acquire sync while present 2 is held", 1, r_q2 == NVN_SYNC_WAIT_RESULT_ALREADY_SIGNALED || r_q2 == NVN_SYNC_WAIT_RESULT_CONDITION_SATISFIED);
+            r_next = P(nvnSyncWait)(&s_acq, 2000000000ull);
+            EXPECT("3-image: CPU SyncWait passes image 0 acquire sync while present 2 is held", 1, r_next == NVN_SYNC_WAIT_RESULT_ALREADY_SIGNALED || r_next == NVN_SYNC_WAIT_RESULT_CONDITION_SATISFIED);
+            // Acquiring image 1 waits on held present 2 (both q2 QueueWaitSync and CPU SyncWait)
+            P(nvnWindowAcquireTexture)(&w3, &s_acq, &r1);
+            EXPECT("3-image: fifth acquire returns image 1", i1, r1);
+            P(nvnQueueWaitSync)(&q2, &s_acq);
+            P(nvnQueueFenceSync)(&q2, &s_q2, NVN_SYNC_CONDITION_ALL_GPU_COMMANDS_COMPLETE, 0);
+            EXPECT("3-image: q2 parks on image 1 acquire sync while present 2 is held", NVN_SYNC_WAIT_RESULT_TIMEOUT_EXPIRED, P(nvnSyncWait)(&s_q2, 200000000ull));
+            EXPECT("3-image: CPU SyncWait expires on image 1 acquire sync while present 2 is held", NVN_SYNC_WAIT_RESULT_TIMEOUT_EXPIRED, P(nvnSyncWait)(&s_acq, 200000000ull));
+            P(nvnEventSignal)(&ev, NVN_EVENT_SIGNAL_MODE_WRITE, 1);
+            r_q2 = P(nvnSyncWait)(&s_q2, 5000000000ull);
+            EXPECT("3-image: q2 proceeds for image 1 once present 2 runs", 1, r_q2 == NVN_SYNC_WAIT_RESULT_ALREADY_SIGNALED || r_q2 == NVN_SYNC_WAIT_RESULT_CONDITION_SATISFIED);
+            r_next = P(nvnSyncWait)(&s_acq, 5000000000ull);
+            EXPECT("3-image: CPU SyncWait signals for image 1 once present 2 runs", 1, r_next == NVN_SYNC_WAIT_RESULT_ALREADY_SIGNALED || r_next == NVN_SYNC_WAIT_RESULT_CONDITION_SATISFIED);
+            P(nvnQueueFinish)(&q); P(nvnQueueFinish)(&q2);
+            P(nvnWindowFinalize)(&w3);
+
+            // (d1) Image-count change 3 -> 2: image 1 still waits on held present 2, and image 0 keeps its successor present (present 1) after image 1 is re-presented
+            EXPECT("3->2 window initializes", 1, P(nvnWindowInitialize)(&w3, &wb3));
+            ev_mem[0] = 0;
+            P(nvnWindowAcquireTexture)(&w3, &s_acq, &i0); P(nvnSyncWait)(&s_acq, UINT64_MAX);
+            P(nvnQueuePresentTexture)(&q, &w3, i0);
+            P(nvnWindowAcquireTexture)(&w3, &s_acq, &i1); P(nvnSyncWait)(&s_acq, UINT64_MAX);
+            P(nvnQueuePresentTexture)(&q, &w3, i1);
+            P(nvnQueueFinish)(&q);
+            P(nvnWindowAcquireTexture)(&w3, &s_acq, &i2); P(nvnSyncWait)(&s_acq, UINT64_MAX);
+            P(nvnCommandBufferBeginRecording)(&cb);
+            P(nvnCommandBufferWaitEvent)(&cb, &ev, NVN_EVENT_WAIT_MODE_EQUAL, 1);
+            h_hold = P(nvnCommandBufferEndRecording)(&cb);
+            P(nvnQueueSubmitCommands)(&q, 1, &h_hold);
+            P(nvnQueuePresentTexture)(&q, &w3, i2);
+            ((set_w)proc("nvnWindowSetNumActiveTextures"))(&w3, 2);
+            P(nvnWindowAcquireTexture)(&w3, &s_acq, &r1);   // 3 % 2 == 1
+            EXPECT("3->2: next acquire returns image 1", 1, r1);
+            P(nvnQueueWaitSync)(&q2, &s_acq);
+            P(nvnQueueFenceSync)(&q2, &s_q2, NVN_SYNC_CONDITION_ALL_GPU_COMMANDS_COMPLETE, 0);
+            EXPECT("3->2: q2 parks on image 1 acquire sync while inactive image 2's present is held", NVN_SYNC_WAIT_RESULT_TIMEOUT_EXPIRED, P(nvnSyncWait)(&s_q2, 200000000ull));
+            EXPECT("3->2: CPU SyncWait expires on image 1 while inactive image 2's present is held", NVN_SYNC_WAIT_RESULT_TIMEOUT_EXPIRED, P(nvnSyncWait)(&s_acq, 200000000ull));
+            P(nvnEventSignal)(&ev, NVN_EVENT_SIGNAL_MODE_WRITE, 1);
+            r_q2 = P(nvnSyncWait)(&s_q2, 5000000000ull);
+            r_next = P(nvnSyncWait)(&s_acq, 5000000000ull);
+            EXPECT("3->2: image 1 proceeds once image 2's present runs", 1, (r_q2 == 0 || r_q2 == 1) && (r_next == 0 || r_next == 1));
+            P(nvnQueueFinish)(&q); P(nvnQueueFinish)(&q2);
+            // Re-present image 1 behind an unsignaled event; image 0's successor must still be present 1 (non-zero, already done), not lost or replaced by the new present of image 1
+            ev_mem[0] = 0;
+            P(nvnCommandBufferBeginRecording)(&cb);
+            P(nvnCommandBufferWaitEvent)(&cb, &ev, NVN_EVENT_WAIT_MODE_EQUAL, 1);
+            h_hold = P(nvnCommandBufferEndRecording)(&cb);
+            P(nvnQueueSubmitCommands)(&q, 1, &h_hold);
+            P(nvnQueuePresentTexture)(&q, &w3, r1);
+            EXPECT("3->2: image 0 retains its own successor receipt after image 1 is re-presented", 1, ((win_t *)&w3)->next_ticket[0] != 0);
+            P(nvnWindowAcquireTexture)(&w3, &s_acq, &r0);   // 4 % 2 == 0
+            EXPECT("3->2: following acquire returns image 0", 0, r0);
+            r_next = P(nvnSyncWait)(&s_acq, 2000000000ull);
+            EXPECT("3->2: image 0 waits on original successor (present 1), not new held present of image 1", 1, r_next == NVN_SYNC_WAIT_RESULT_ALREADY_SIGNALED || r_next == NVN_SYNC_WAIT_RESULT_CONDITION_SATISFIED);
+            P(nvnEventSignal)(&ev, NVN_EVENT_SIGNAL_MODE_WRITE, 1);
+            P(nvnQueueFinish)(&q); P(nvnQueueFinish)(&q2);
+            P(nvnWindowFinalize)(&w3);
+
+            // (d2) Image-count change 2 -> 3: newly activated image 2 is free immediately; image 0 still waits on present 1; image 1 waits on held present 2
+            ((set_b)proc("nvnWindowBuilderSetNumActiveTextures"))(&wb3, 2);
+            EXPECT("2->3 window initializes with 2 active", 1, P(nvnWindowInitialize)(&w3, &wb3));
+            ev_mem[0] = 0;
+            P(nvnWindowAcquireTexture)(&w3, &s_acq, &i0); P(nvnSyncWait)(&s_acq, UINT64_MAX);
+            P(nvnQueuePresentTexture)(&q, &w3, i0);
+            P(nvnWindowAcquireTexture)(&w3, &s_acq, &i1); P(nvnSyncWait)(&s_acq, UINT64_MAX);
+            P(nvnQueuePresentTexture)(&q, &w3, i1);
+            P(nvnQueueFinish)(&q);
+            ((set_w)proc("nvnWindowSetNumActiveTextures"))(&w3, 3);
+            P(nvnWindowAcquireTexture)(&w3, &s_acq, &i2);   // 2 % 3 == 2 (never presented)
+            EXPECT("2->3: newly active image 2 is acquired", 2, i2);
+            EXPECT("2->3: never-presented image 2 is already signaled", NVN_SYNC_WAIT_RESULT_ALREADY_SIGNALED, P(nvnSyncWait)(&s_acq, 0));
+            P(nvnCommandBufferBeginRecording)(&cb);
+            P(nvnCommandBufferWaitEvent)(&cb, &ev, NVN_EVENT_WAIT_MODE_EQUAL, 1);
+            h_hold = P(nvnCommandBufferEndRecording)(&cb);
+            P(nvnQueueSubmitCommands)(&q, 1, &h_hold);
+            P(nvnQueuePresentTexture)(&q, &w3, i2);
+            P(nvnWindowAcquireTexture)(&w3, &s_acq, &r0);   // 3 % 3 == 0: successor is present 1 (done), not held present 2
+            EXPECT("2->3: next acquire returns image 0", 0, r0);
+            r_next = P(nvnSyncWait)(&s_acq, 2000000000ull);
+            EXPECT("2->3: image 0 passes while image 2's present is held", 1, r_next == NVN_SYNC_WAIT_RESULT_ALREADY_SIGNALED || r_next == NVN_SYNC_WAIT_RESULT_CONDITION_SATISFIED);
+            P(nvnQueuePresentTexture)(&q2, &w3, r0);
+            P(nvnQueueFinish)(&q2);
+            P(nvnWindowAcquireTexture)(&w3, &s_acq, &r1);   // 4 % 3 == 1: successor is held present 2
+            EXPECT("2->3: following acquire returns image 1", 1, r1);
+            P(nvnQueueWaitSync)(&q2, &s_acq);
+            P(nvnQueueFenceSync)(&q2, &s_q2, NVN_SYNC_CONDITION_ALL_GPU_COMMANDS_COMPLETE, 0);
+            EXPECT("2->3: q2 parks on image 1 acquire sync while image 2's present is held", NVN_SYNC_WAIT_RESULT_TIMEOUT_EXPIRED, P(nvnSyncWait)(&s_q2, 200000000ull));
+            EXPECT("2->3: CPU SyncWait expires on image 1 while image 2's present is held", NVN_SYNC_WAIT_RESULT_TIMEOUT_EXPIRED, P(nvnSyncWait)(&s_acq, 200000000ull));
+            P(nvnEventSignal)(&ev, NVN_EVENT_SIGNAL_MODE_WRITE, 1);
+            r_q2 = P(nvnSyncWait)(&s_q2, 5000000000ull);
+            r_next = P(nvnSyncWait)(&s_acq, 5000000000ull);
+            EXPECT("2->3: image 1 proceeds once image 2's present runs", 1, (r_q2 == 0 || r_q2 == 1) && (r_next == 0 || r_next == 1));
+            P(nvnQueueFinish)(&q); P(nvnQueueFinish)(&q2);
+            P(nvnWindowFinalize)(&w3);
+
+            P(nvnSyncFinalize)(&s_q2);
+            P(nvnQueueFinalize)(&q2);
+            free(qmem2);
+        }
+
+        // QueueWaitSync without CPU SyncWait, drained by next acquire
+        int qidx0 = -1, qidx1 = -1;
+        P(nvnWindowAcquireTexture)(&win, &s_acq, &qidx0);
+        P(nvnQueueWaitSync)(&q, &s_acq);
+        P(nvnQueuePresentTexture)(&q, &win, qidx0);
+        P(nvnWindowAcquireTexture)(&win, &s_acq, &qidx1);
+        // Re-fencing overwrites the pending acquire sync cleanly
+        P(nvnQueueFenceSync)(&q, &s_acq, NVN_SYNC_CONDITION_ALL_GPU_COMMANDS_COMPLETE, 0);
+        NVNsyncWaitResult r_ref = P(nvnSyncWait)(&s_acq, UINT64_MAX);
+        EXPECT("re-fenced acquire sync waits cleanly", 1, r_ref == NVN_SYNC_WAIT_RESULT_ALREADY_SIGNALED || r_ref == NVN_SYNC_WAIT_RESULT_CONDITION_SATISFIED);
+        P(nvnQueueFinish)(&q);
+        P(nvnSyncFinalize)(&s_acq);
+        P(nvnWindowFinalize)(&win);
+        P(nvnEventFinalize)(&ev);
+        P(nvnMemoryPoolFinalize)(&ep);
+    }
+
+    // 6a2. Off-screen native window (dm_native_window_offscreen: GameChat's virtual camera): initialized through WindowBuilderSetNativeWindow,
+    // respects SetNumActiveTextures, rotates without pacing or counting as game frames, safely replaces owned sync states (fenced 3 / 4), and finalizes cleanly
+    {
+        NVNwindowBuilder owb; NVNwindow off;
+        NVNtexture *sc3[3] = {&sc[0], &sc[1], &sc[0]};
+        typedef void (*set_b)(NVNwindowBuilder *, int);
+        P(nvnWindowBuilderSetDevice)(&owb, &dev); P(nvnWindowBuilderSetDefaults)(&owb);
+        P(nvnWindowBuilderSetNativeWindow)(&owb, &g_test_offscreen_native);
+        P(nvnWindowBuilderSetTextures)(&owb, 3, sc3);
+        ((set_b)proc("nvnWindowBuilderSetNumActiveTextures"))(&owb, 2);
+        EXPECT("off-screen WindowInitialize succeeds", 1, P(nvnWindowInitialize)(&off, &owb));
+        EXPECT("off-screen flag set from native window", 1, ((win_t *)&off)->offscreen);
+        EXPECT("display window stays on screen", 0, ((win_t *)&win)->offscreen);
+
+        NVNsync os; P(nvnSyncInitialize)(&os, &dev);
+        // Pre-populate os with an owned logical receipt (fenced == 3) and then a deferred acquire wait (fenced == 4) before reusing it on the off-screen window
+        P(nvnQueueFenceSync)(&q, &os, NVN_SYNC_CONDITION_ALL_GPU_COMMANDS_COMPLETE, 0);
+        uint64_t f0 = dm_nvn_frame_count(); int oi[3] = {-1, -1, -1};
+        EXPECT("off-screen acquire replaces fenced==3 sync", NVN_WINDOW_ACQUIRE_TEXTURE_RESULT_SUCCESS, P(nvnWindowAcquireTexture)(&off, &os, &oi[0]));
+        EXPECT("off-screen acquire sets fenced==2", 2, ((sync_t *)&os)->fenced);
+        P(nvnQueueWaitSync)(&q, &os);
+        P(nvnQueuePresentTexture)(&q, &off, oi[0]);
+
+        NVNwindow on_win; P(nvnWindowInitialize)(&on_win, &wb);
+        int on_idx = -1; P(nvnWindowAcquireTexture)(&on_win, &os, &on_idx);
+        EXPECT("on-screen acquire sets fenced==4", 4, ((sync_t *)&os)->fenced);
+        EXPECT("off-screen acquire replaces fenced==4 sync", NVN_WINDOW_ACQUIRE_TEXTURE_RESULT_SUCCESS, P(nvnWindowAcquireTexture)(&off, &os, &oi[1]));
+        EXPECT("off-screen acquire resets fenced==2", 2, ((sync_t *)&os)->fenced);
+        P(nvnQueuePresentTexture)(&q, &off, oi[1]);
+        P(nvnWindowFinalize)(&on_win);
+
+        P(nvnWindowAcquireTexture)(&off, &os, &oi[2]);
+        P(nvnQueuePresentTexture)(&q, &off, oi[2]);
+        EXPECT("off-screen active textures rotate 0,1,0", 0x010, oi[0] << 8 | oi[1] << 4 | oi[2]);
+        EXPECT("off-screen presents are not frames", 1, dm_nvn_frame_count() == f0);
+        NVNsyncWaitResult owr = P(nvnSyncWait)(&os, UINT64_MAX);
+        EXPECT("off-screen acquire sync signaled (0 or 1)", 1, owr == NVN_SYNC_WAIT_RESULT_ALREADY_SIGNALED || owr == NVN_SYNC_WAIT_RESULT_CONDITION_SATISFIED);
+        EXPECT("off-screen acquire sync already signaled after wait", 0, P(nvnSyncWait)(&os, 0));
+        P(nvnQueueFinish)(&q);
+        P(nvnSyncFinalize)(&os);
+        P(nvnWindowFinalize)(&off);
+    }
 
     // 6b. Readback: pixel (x,y) = {x*16+y, y*16+x, 0x55, 0xAA} (expected values computed directly from the formula)
     {
@@ -1668,6 +2002,40 @@ int main(void) {
         P(nvnMemoryPoolFinalize)(&mp);
     }
 
+    {   // STORM 3 records uploads, then reinitializes the texture on the same storage with fewer mips before submitting.
+        enum { LEVEL0_BYTES = 2048, LEVEL1_BYTES = 512, UPLOAD_BYTES = LEVEL0_BYTES + LEVEL1_BYTES };
+        static uint8_t storage[16384] __attribute__((aligned(16384)));
+        static uint8_t transfer[16384] __attribute__((aligned(16384)));
+        NVNmemoryPoolBuilder pb;
+        NVNmemoryPool texture_pool, transfer_pool;
+        P(nvnMemoryPoolBuilderSetDevice)(&pb, &dev); P(nvnMemoryPoolBuilderSetDefaults)(&pb);
+        P(nvnMemoryPoolBuilderSetStorage)(&pb, storage, sizeof storage); P(nvnMemoryPoolBuilderSetFlags)(&pb, NVN_MEMORY_POOL_FLAGS_CPU_NO_ACCESS | NVN_MEMORY_POOL_FLAGS_GPU_CACHED);
+        P(nvnMemoryPoolInitialize)(&texture_pool, &pb);
+        P(nvnMemoryPoolBuilderSetStorage)(&pb, transfer, sizeof transfer); P(nvnMemoryPoolBuilderSetFlags)(&pb, NVN_MEMORY_POOL_FLAGS_CPU_CACHED | NVN_MEMORY_POOL_FLAGS_GPU_CACHED);
+        P(nvnMemoryPoolInitialize)(&transfer_pool, &pb);
+        for (size_t i = 0; i < UPLOAD_BYTES; i++) transfer[i] = (uint8_t)(1 + (i + i / 97) % 253);
+        NVNtextureBuilder tb;
+        NVNtexture t = {0};
+        P(nvnTextureBuilderSetDevice)(&tb, &dev); P(nvnTextureBuilderSetDefaults)(&tb);
+        P(nvnTextureBuilderSetSize2D)(&tb, 64, 64); P(nvnTextureBuilderSetFormat)(&tb, NVN_FORMAT_RGBA_DXT1);
+        P(nvnTextureBuilderSetStorage)(&tb, &texture_pool, 0); P(nvnTextureBuilderSetLevels)(&tb, 4);
+        P(nvnTextureInitialize)(&t, &tb);
+        NVNtextureView mip;
+        NVNcopyRegion region0 = {0, 0, 0, 64, 64, 1}, region1 = {0, 0, 0, 32, 32, 1};
+        P(nvnTextureViewSetDefaults)(&mip); P(nvnTextureViewSetLevels)(&mip, 1, 1);
+        NVNbufferAddress src = (NVNbufferAddress)transfer, dst = src + 8192;
+        STORE_RUN(P(nvnCommandBufferCopyBufferToTexture)(&cb, src, &t, NULL, &region0, 0);
+                  P(nvnCommandBufferCopyBufferToTexture)(&cb, src + LEVEL0_BYTES, &t, &mip, &region1, 0);
+                  P(nvnTextureBuilderSetLevels)(&tb, 2);
+                  P(nvnTextureInitialize)(&t, &tb));
+        STORE_RUN(P(nvnCommandBufferCopyTextureToBuffer)(&cb, &t, NULL, &region0, dst, 0);
+                  P(nvnCommandBufferCopyTextureToBuffer)(&cb, &t, &mip, &region1, dst + LEVEL0_BYTES, 0));
+        EXPECT("a truncated BC1 texture retains the uploads to its first two mips", 0, memcmp(transfer, transfer + 8192, UPLOAD_BYTES) != 0);
+        P(nvnTextureFinalize)(&t);
+        P(nvnMemoryPoolFinalize)(&texture_pool);
+        P(nvnMemoryPoolFinalize)(&transfer_pool);
+    }
+
     // 6c4. The same into 3D textures, slice by slice (GitHub #1856: LEGO Star Wars fills BC6H light-probe volumes a slice at a time): a buffer copy into a BC6H MINIMAL_LAYOUT volume (padded row
     //      and image strides) and into level 1 of an RGBA8 volume with a deeper block (its planes interleave in the block), and a 3D → 3D texture copy, each stored on the GPU; and a 3D
     //      WriteTexels region (written in place on the CPU); each byte-identical to "decode the 3D level → patch its slices → re-encode", with the rest of the pool untouched
@@ -1774,6 +2142,21 @@ int main(void) {
         P(nvnWindowAcquireTexture)(&w2, NULL, &ix);
         EXPECT("5th acquire returns texture 1", 1, ix);
         nvn_present_config(0, 0);
+        // A game that changes its interval on alternate frames (Mario Kart World below its 60 fps) does not get a log line for each change: the first 8, then each power of two (1..8, 16..1024 = 15)
+        uint64_t n0 = atomic_load(&g_itv_changes);
+        EXPECT("no present interval changes before this test", 0, n0);
+        fflush(stderr); int keep = dup(2);
+        char tp[1024]; snprintf(tp, sizeof tp, "%s/t_nvn_itv_XXXXXX", getenv("TMPDIR") ? getenv("TMPDIR") : ".");
+        int fd = mkstemp(tp); EXPECT("temp file opened for interval log check", 1, fd >= 0);
+        if (fd >= 0) dup2(fd, 2);
+        for (int k = 0; k < 2000; k++) P(nvnWindowSetPresentInterval)(&w2, 2 - (k & 1));   // 2, 1, 2, 1, ...: every call a change
+        P(nvnWindowSetPresentInterval)(&w2, 1);   // the same value again: no change, no line
+        fflush(stderr); dup2(keep, 2); close(keep);
+        static char lb[65536]; ssize_t nb = fd >= 0 ? pread(fd, lb, sizeof lb - 1, 0) : 0; if (fd >= 0) { close(fd); unlink(tp); } lb[nb > 0 ? nb : 0] = 0;
+        int lines = 0; for (const char *c = lb; (c = strstr(c, "the game sets present interval")); c++) lines++;
+        EXPECT("2,000 interval changes counted", 2000, atomic_load(&g_itv_changes) - n0);
+        EXPECT("... written for the first 8 and each power of two", 15, lines);
+        EXPECT("... which is 20 lines at most", 1, lines <= 20);
     }
 
     // 6f. Present thread: when the drawable stays unavailable for a long time (the present thread stalls 200 ms each time), the present call still returns immediately;

@@ -1,5 +1,6 @@
 """NSP script with a NUP container (scripts/pack_nup.py): the container is read and checked, its versions and DLC packed into what the script's later steps read, its control data saved,
 and the script asks for no keys. The NUPs are written here (SPEC v1, https://github.com/a55uka/nup). The run stops at the prerequisite check; no game files, keys or Xcode needed."""
+import errno
 import hashlib
 import importlib.util
 import json
@@ -13,8 +14,11 @@ import unittest
 from unittest import mock
 
 REPO = Path(__file__).resolve().parents[3]
+sys.path.insert(0, str(REPO / 'dm/games'))
 sys.path.insert(0, str(REPO / 'dm/tools'))
 import nacp
+import profile_guess
+import romfs
 import romfs_image
 spec = importlib.util.spec_from_file_location('build_ipa_from_nsp', REPO / 'scripts/build_ipa_from_nsp.py')
 if spec is None or spec.loader is None: raise ImportError('scripts/build_ipa_from_nsp.py')
@@ -471,6 +475,17 @@ class Pack(Base):
         write_nup(self.path, [(0, TID, 0, version(), b''), (1, TID, VER, version(tid=TID + 0x2000), b'')])
         with self.assertRaisesRegex(pack_nup.Error, 'different applications'): pack_nup.scan(self.open())
 
+    def test_npdm_bounds_and_header_aci0_text(self):
+        d = bytearray(npdm(TID)); d[0x20:0x24] = b'ACI0'; d[0x30:0x38] = b'1.0.0\0\0\0'
+        self.assertEqual(pack_nup.program_id(bytes(d), 'test'), TID)
+        for raw, msg in ((b'META', 'not an NPDM'),
+                         (b'META' + bytes(0x70), 'not an NPDM'),
+                         (d[:0x90], 'no ACI0 section')):
+            with self.assertRaisesRegex(pack_nup.Error, msg): pack_nup.program_id(bytes(raw), 'test')
+        for off, size in ((0x20, 0x20), (0x80, 0x17), (0x80, 0x200)):
+            bad = bytearray(d); struct.pack_into('<II', bad, 0x70, off, size)
+            with self.assertRaisesRegex(pack_nup.Error, 'no ACI0 section'): pack_nup.program_id(bytes(bad), 'test')
+
     def test_update_packed_on_its_own_with_control_data(self):
         n = self.open(); app, base, vers, _ = pack_nup.scan(n)
         pack_nup.pack_version(n, vers[VER], base, app, self.out() / 'u', say=lambda s: None)
@@ -805,6 +820,33 @@ class Programs(Base):
                 write_nup(self.path, packages)
                 with pack_nup.Nup(self.path) as n, self.assertRaisesRegex(pack_nup.Error, error): pack_nup.scan(n)
 
+    def test_same_family_multi_program_collection_defaults_to_program_zero(self):
+        # A multi-title collection NUP (all programs under the same base ID, e.g. ACA NEOGEO SELECTION Vol.9: programs 0, 1, 6)
+        # defaults to program 0 (the launcher), leaves sibling_romfs empty (each program is packed as its own executable), and exposes
+        # sibling indices (including program 6) for build_ipa_from_nsp.py's provisional discovery.
+        c0, c1, c6 = 0x01008E3025222000, 0x01008E3025222001, 0x01008E3025222006
+        write_nup(self.path, [
+            (0, c0, 0, {'exefs': version(tid=c0)['exefs'], 'romfs': {'menu.bin': b'launcher'}}, META),
+            (0, c1, 0, {'exefs': version(tid=c1)['exefs'], 'romfs': {'g1.bin': b'game1'}}, b''),
+            (0, c6, 0, {'exefs': version(tid=c6)['exefs'], 'romfs': {'g6.bin': b'magician-lord'}}, b''),
+        ])
+        n = self.open()
+        app, base, vers, dlc = pack_nup.scan(n)
+        self.assertEqual((app, n.application, n.multi_program, sorted(n.siblings), vers, dlc), (c0, c0, True, [1, 6], {}, {}))
+        self.assertEqual(pack_nup.sibling_romfs(n, base), {})
+        discovered = nsp.discover_sibling_programs({'nup': n}, c0, base, None, None, None, self.dir / 'list.log', {})
+        self.assertEqual(discovered, {
+            1: {'tid': c1, 'in_base': True, 'in_update': False},
+            6: {'tid': c6, 'in_base': True, 'in_update': False},
+        })
+        out = self.dir / 'out_coll'
+        pack_nup.pack_version(n, base, base, app, out, say=lambda s: None)
+        self.assertFalse((out / pack_nup.PROGRAMS).exists())
+        # Explicit --program 6 selects Magician Lord cleanly.
+        app6, base6, _, _ = pack_nup.scan(self.open(), 6)
+        self.assertEqual(app6, c6)
+        self.assertEqual(base6.title_id, c6)
+
     def test_script_reads_the_program_and_its_siblings(self):   # --program, --title-id (the program's or the application's), the survey's manifest, the disk estimate, the format check
         write_nup(self.path, edition(s1_updates=[(VER, 's1new')]))
         for program, want, app in ((None, S2, S2), (0, S1, S1), (None, S1, S2)):
@@ -817,7 +859,7 @@ class Programs(Base):
         self.assertEqual(nsp.survey_nup(n, fam['base'], fam['base'], out), 2)
         rows = (out / 'romfs_manifest.tsv').read_text().splitlines()[1:]
         self.assertIn(f'/System/RegionLangMask.txt\t3\t{b"own".hex()}', rows)   # its own file wins over the other program's of that path
-        self.assertTrue(any(r.startswith('/data/s1\t') for r in rows))
+        self.assertIn(f'/data/s1\t400\t{(b"data" * 8).hex()}\tprogram:0', rows)
         self.assertEqual(pack_nup.romfs_bytes(n, fam['base'], fam['base']), 3 + 400 + 2)
         with mock.patch.object(nsp, 'PROG', mock.Mock()):
             d = nsp.extract_nup(self.dir / 'ex', 'v0', fam['base'], fam['base'], got, n)
@@ -826,6 +868,74 @@ class Programs(Base):
             write_nup(self.path, bad); got, fam = nsp.scan_nup(self.path); self.addCleanup(fam['nup'].close)
             nsp.extract_nup(self.dir / 'ex', 'v0', fam['base'], fam['base'], got, fam['nup'])
             with mock.patch.object(nsp, 'ALLOW_DAMAGED', False), self.assertRaisesRegex(nsp.BuildError, r'v0 program 0: 1 file'): nsp.check_formats({'v0': d})
+
+    def test_provisional_romfs_marker_stays_in_packed_program(self):   # issue #3289: a sibling program's larger RomFS stays in the combined inventory, never becomes romfs_marker
+        for case, own_romfs, program, want_marker, want_n, want_bytes in (
+            ('small own file vs large sibling', {'dummy.bin': b'12345'}, None, 'dummy.bin', 2, 5 + 800),
+            ('empty own RomFS vs large sibling', {}, None, '', 1, 800),
+            ('path collision keeps own row eligible', {'System/RegionLangMask.txt': b'own'}, None, 'System/RegionLangMask.txt', 2, 3 + 800),
+            ('program 0 selected picks its own largest file', {'dummy.bin': b'12345'}, 0, 'sound/jp.pck', 2, 5 + 800),
+        ):
+            with self.subTest(case=case):
+                s1 = {'exefs': {'main': b'switch 1 code', 'main.npdm': npdm(S1)},
+                      'romfs': {'sound/jp.pck': b'AKPK' + b'x' * 796, **({'System/RegionLangMask.txt': b's1'} if 'System/RegionLangMask.txt' in own_romfs else {})}}
+                s2 = {'exefs': {'main': b'switch 2 code', 'main.npdm': npdm(S2)}, 'romfs': own_romfs}
+                write_nup(self.path, [(0, S1, 0, s1, META), (0, S2, 0, s2, program_nacp())])
+                got, fam = nsp.scan_nup(self.path, program=program); self.addCleanup(fam['nup'].close)
+                survey_out = self.dir / f'survey_{case.split()[0]}'
+                self.assertEqual(nsp.survey_nup(fam['nup'], fam['base'], fam['base'], survey_out), want_n)
+                facts = profile_guess.facts_of(survey_out / 'ExeFS', survey_out / 'romfs_manifest.tsv')
+                self.assertEqual((facts['romfs']['n'], facts['romfs']['bytes']), (want_n, want_bytes))
+                self.assertEqual(facts['romfs']['mags']['Wwise pck'], 1)
+                self.assertEqual(facts['romfs']['biggest'][1], want_marker)
+                facts['mods'] = {'main': {'bid': '00' * 16}}
+                pdir = self.dir / f'profile_{case.split()[0]}'
+                with mock.patch.object(nsp, 'pg', profile_guess, create=True), \
+                     mock.patch.object(profile_guess, 'guess', return_value={'modules': ('main', '')}), mock.patch.object(nsp, 'say'):
+                    nsp.write_profile(pdir, got, {'F': facts, 'name': 'Test', 'survey': 'survey.md', 'version': 'v0', 'display': '2.0.0'})
+                marker = next(line.partition('\t')[2] for line in (pdir / 'game.tsv').read_text().splitlines() if line.startswith('romfs_marker\t'))
+                self.assertEqual(marker, want_marker)
+                ex_dir = self.dir / f'ex_{case.split()[0]}'
+                pack_nup.pack_version(fam['nup'], fam['base'], fam['base'], got, ex_dir, say=lambda s: None)
+                self.assertTrue((romfs.Path(ex_dir / 'RomFS.img') / marker).exists())
+
+    def test_reused_provisional_profile_reconciles_stale_sibling_marker(self):
+        # Retrying a multi-program NUP with a provisional profile created before 2cc4cda2 must replace
+        # the stale sibling romfs_marker while preserving hand-edited settings and comments.
+        import game as gamemod
+        for case, own_romfs, want_marker in (
+            ('small own file replaces stale sibling marker', {'dummy.bin': b'12345'}, 'dummy.bin'),
+            ('empty own RomFS clears stale sibling marker', {}, ''),
+            ('valid hand-edited marker stays untouched', {'dummy.bin': b'12345', 'keep.dat': b'1'}, 'keep.dat'),
+        ):
+            with self.subTest(case=case):
+                s1 = {'exefs': {'main': b'switch 1 code', 'main.npdm': npdm(S1)}, 'romfs': {'sound/jp.pck': b'AKPK' + b'x' * 796}}
+                s2 = {'exefs': {'main': b'switch 2 code', 'main.npdm': npdm(S2)}, 'romfs': own_romfs}
+                write_nup(self.path, [(0, S1, 0, s1, META), (0, S2, 0, s2, program_nacp())])
+                got, fam = nsp.scan_nup(self.path); self.addCleanup(fam['nup'].close)
+                ex_dir = self.dir / f'ex_retry_{case.split()[0]}'
+                pack_nup.pack_version(fam['nup'], fam['base'], fam['base'], got, ex_dir, say=lambda s: None)
+                pdir = self.dir / f'prof_retry_{case.split()[0]}' / f'{got:016X}'
+                pdir.mkdir(parents=True)
+                initial_marker = 'keep.dat' if want_marker == 'keep.dat' else 'sound/jp.pck'
+                (pdir / 'game.tsv').write_text(
+                    f'# hand-edited provisional profile\n'
+                    f'title_id\t{got:016X}\n'
+                    f'modules\tmain\n'
+                    f'romfs_marker\t{initial_marker}\n'
+                    f'# user custom tuning\n'
+                    f'mem_reserve\t0x12340000\n',
+                    encoding='utf-8',
+                )
+                g = gamemod.Game(pdir)
+                with mock.patch.object(nsp, 'say'):
+                    g2 = nsp.reconcile_provisional_marker(g, nsp.rfs.source(ex_dir))
+                self.assertEqual(g2.get('romfs_marker'), want_marker)
+                self.assertEqual(g2.get('mem_reserve'), '0x12340000')
+                text = (pdir / 'game.tsv').read_text(encoding='utf-8')
+                self.assertIn('# hand-edited provisional profile', text)
+                self.assertIn('# user custom tuning', text)
+                self.assertTrue((romfs.Path(ex_dir / 'RomFS.img') / want_marker).exists())
 
 
 class StandaloneCLI(Base):
@@ -846,7 +956,110 @@ class StandaloneCLI(Base):
         self.assertFalse((work / 'extract/v0').exists())
 
 
+class ExternalDlc(Base):
+    def setUp(self):
+        super().setUp()
+        self.source = self.dir / 'player-dlc'; self.source.mkdir()
+        self.work = self.dir / 'build'
+        self.romfs = self.dir / 'dlc-romfs'; self.romfs.mkdir()
+        self.marker = self.romfs / 'marker'
+
+    def image(self, name, content):
+        self.marker.write_bytes(content)
+        img = self.source / name
+        romfs_image.pack(self.romfs, img)
+        return img
+
+    def test_rebuild_uses_only_current_selected_images(self):
+        old = self.open()
+        app, _, _, dlc = pack_nup.scan(old)
+        cached = self.work / 'aoc'
+        pack_nup.pack_dlc(old, app, dlc, cached, say=lambda _: None)   # a stamped image from a previous pack
+        (cached / '4.img').write_bytes((cached / '1.img').read_bytes())   # an earlier NSP extraction had only a directory-wide key
+        (self.work / 'aoc.key').write_text('previous extraction')
+        one = self.image('1.img', b'original')
+        two = self.image('2.IMG', b'other')
+        (self.source / '._1.img').write_bytes(b'AppleDouble')
+
+        staged = nsp.stage_external_dlc(self.work, self.source)
+        assert staged is not None
+        self.assertEqual(sorted(p.name for p in staged.iterdir()), ['1.img', '2.img'])
+        self.assertEqual((staged / '1.img').read_bytes(), one.read_bytes())
+        self.assertEqual((staged / '2.img').read_bytes(), two.read_bytes())
+        with mock.patch.object(nsp.shutil, 'copyfile', side_effect=AssertionError('copied unchanged DLC')):
+            self.assertEqual(nsp.stage_external_dlc(self.work, self.source), staged)
+
+        before = one.stat()
+        self.image(one.name, b'replaced')
+        os.utime(one, ns=(before.st_atime_ns, before.st_mtime_ns))
+        self.assertEqual(one.stat().st_size, before.st_size)
+        self.assertEqual(nsp.stage_external_dlc(self.work, self.source), staged)
+        self.assertEqual(nsp.rfs.Path(staged / '1.img/marker').read_bytes(), b'replaced')
+        two.unlink()
+        self.assertEqual(nsp.stage_external_dlc(self.work, self.source), staged)
+        self.assertEqual(sorted(p.name for p in staged.iterdir()), ['1.img'])
+        self.assertEqual((staged / '1.img').read_bytes(), one.read_bytes())
+        self.assertEqual(nsp.rfs.Path(staged / '1.img/marker').read_bytes(), b'replaced')
+
+        nsp.rmtree(staged.parent)   # a front end can discard the stage after a successful build
+        self.assertEqual(nsp.stage_external_dlc(self.work, self.source), staged)
+        self.assertEqual(nsp.rfs.Path(staged / '1.img/marker').read_bytes(), b'replaced')
+        one.unlink()
+        self.assertIsNone(nsp.stage_external_dlc(self.work, self.source))
+        self.assertEqual(list(staged.iterdir()), [])
+        self.assertEqual(sorted(p.name for p in cached.iterdir()), ['1.img', '1.img.inputs.json', '4.img'])
+
+    def test_invalid_image_keeps_the_previous_stage(self):
+        one = self.image('1.img', b'original')
+        staged = nsp.stage_external_dlc(self.work, self.source)
+        assert staged is not None
+        before = one.read_bytes()
+        self.image(one.name, b'replaced')
+        broken = self.source / '2.img'; broken.write_bytes(b'not a RomFS image')
+        with self.assertRaisesRegex(nsp.BuildError, r'invalid RomFS image .*2\.img'):
+            nsp.stage_external_dlc(self.work, self.source)
+        self.assertEqual(list(staged.iterdir()), [staged / '1.img'])
+        self.assertEqual((staged / '1.img').read_bytes(), before)
+        self.assertFalse(staged.parent.with_suffix('.partial').exists())
+        broken.unlink()
+        self.assertEqual(nsp.stage_external_dlc(self.work, self.source), staged)
+        self.assertEqual((staged / '1.img').read_bytes(), one.read_bytes())
+
+    def test_invalid_index_is_rejected(self):
+        img = self.image('2001.img', b'dlc')
+        with self.assertRaisesRegex(nsp.BuildError, r'indices 1 to 2000: .*2001\.img'):
+            nsp.stage_external_dlc(self.work, self.source)
+        self.assertTrue(img.is_file())
+
+    def test_option_requires_a_nup_without_embedded_dlc(self):
+        for target in (self.source, self.path):
+            with self.subTest(target=target), self.assertRaisesRegex(nsp.BuildError, 'requires a NUP without embedded DLC'):
+                nsp.main(nsp.parse_args([str(target), '--aoc-dir', str(self.source)]))
+
+
 class Main(Base):
+    def test_aoc_dir_supplies_the_builds_dlc(self):
+        write_nup(self.path, [(0, TID, 0, version(), META), (1, TID, VER, version(), b'')])
+        romfs = self.dir / 'dlc-romfs'; romfs.mkdir()
+        (romfs / 'marker').touch()
+        source = self.dir / 'aoc'; source.mkdir()
+        romfs_image.pack(romfs, source / '1.img')
+        work = self.dir / f'{TID:016X}_build'
+        stale = work / 'aoc'; stale.mkdir(parents=True)
+        romfs_image.pack(romfs, stale / '2.img')
+        from game import Game
+        game = Game(REPO / 'dm/games' / f'{TID:016X}')
+        sources = {'graphics': ('gl', 'test'), 'gl_capture': (False, ''), 'gl_fixed': (False, '')}
+        with mock.patch.object(nsp, 'check_prereqs'), mock.patch.object(nsp, 'check_versions_aarch64'), \
+             mock.patch.object(nsp, 'build_mismatch', return_value=[]), mock.patch.object(nsp, 'build_sources', return_value=sources), \
+             mock.patch.object(nsp, 'rewrite', return_value=game), mock.patch.object(nsp, 'chain_header'), \
+             mock.patch.object(nsp, 'say'), mock.patch.object(nsp, 'build_gl_shaders', side_effect=Stop) as shaders:
+            for extra, expected in ((['--aoc-dir', str(source)], [work / 'external-dlc/aoc/1.img']), ([], [])):
+                with self.subTest(extra=extra), self.assertRaises(Stop):
+                    nsp.main(nsp.parse_args([str(self.path)] + extra))
+                self.assertEqual(len(shaders.call_args.args[2]), 2)
+                self.assertEqual(shaders.call_args.kwargs['dlc_roms'], expected)
+
     def test_app_version_from_a_nup_when_only_the_update_is_extracted(self):
         tid, ver = 0x0400486024DEC000, 131072
         from game import Game
@@ -928,6 +1141,90 @@ class Main(Base):
                      mock.patch.object(nsp, 'check_prereqs'), mock.patch.object(nsp, 'say'), mock.patch.object(nsp.PROG, 'say') as red:
                     self.assertEqual(nsp.cli(argv), 1)
                 self.assertRegex(red.call_args.args[0], r'^\[RED\] .*no romfs/')
+
+
+class WriterErrors(Base):
+    def test_copy_failure_closes_mmap_and_preserves_original_error(self):
+        tree = {
+            'exefs': {'main': b'code', 'main.npdm': npdm(TID)},
+            'romfs': {'stored.bin': b'short-stored-entry', 'compressed.bin': b'zstd-entry-' * 40},
+        }
+        write_nup(self.path, [(0, TID, 0, tree, META)])
+
+        class EnospcSink:
+            def write(self, data):
+                raise OSError(errno.ENOSPC, os.strerror(errno.ENOSPC))
+
+        for member, expected_codec in ((b'stored.bin', 0), (b'compressed.bin', 1)):
+            with self.subTest(member=member):
+                holder = {}
+                with self.assertRaises(OSError) as ctx:
+                    with pack_nup.Nup(self.path) as n:
+                        holder['n'] = n
+                        idx = n.child(n.packages[0].romfs, member)
+                        self.assertIsNotNone(idx)
+                        self.assertEqual(n.files[idx][5], expected_codec)
+                        n.copy(idx, EnospcSink())
+                self.assertEqual(ctx.exception.errno, errno.ENOSPC)
+                self.assertTrue(holder['n'].mm.closed)
+
+        # Corrupted zstd payload also closes the mapping and propagates pack_nup.Error (not BufferError)
+        raw = bytearray(self.path.read_bytes())
+        with pack_nup.Nup(self.path) as n:
+            idx = n.child(n.packages[0].romfs, b'compressed.bin')
+            eoff = n.files[idx][3]
+        raw[eoff:eoff + 4] = b'\xff\xff\xff\xff'
+        bad_nup = self.dir / 'bad_zstd.nup'
+        bad_nup.write_bytes(raw)
+        holder = {}
+        with self.assertRaises(pack_nup.Error):
+            with pack_nup.Nup(bad_nup) as n:
+                holder['n'] = n
+                n.copy(idx, EnospcSink())
+        self.assertTrue(holder['n'].mm.closed)
+
+    def test_top_level_pack_enospc_preserves_previous_image_and_reports_oserror(self):
+        # First pack a finished image
+        v1 = {'exefs': {'main': b'code', 'main.npdm': npdm(TID)}, 'romfs': {'stored.bin': b'first-image', 'z.bin': b'a' * 300}}
+        v2 = {'exefs': {'main': b'code', 'main.npdm': npdm(TID)}, 'romfs': {'stored.bin': b'second-image', 'z.bin': b'b' * 300}}
+        write_nup(self.path, [(0, TID, 0, v1, META)])
+        work = self.dir / 'work'
+        with mock.patch.object(sys, 'argv', ['pack_nup.py', str(self.path), '--work-dir', str(work)]):
+            pack_nup.main()
+        img = work / 'extract/v0/RomFS.img'
+        previous = img.read_bytes()
+
+        # Replace NUP with updated RomFS and fail writing RomFS.img.part with ENOSPC
+        write_nup(self.path, [(0, TID, 0, v2, META)])
+        real_open = open
+
+        class FailingWriter:
+            def __init__(self, f):
+                self._f = f
+                self._writes = 0
+            def write(self, data):
+                self._writes += 1
+                if self._writes >= 2:
+                    raise OSError(errno.ENOSPC, os.strerror(errno.ENOSPC))
+                return self._f.write(data)
+            def __enter__(self): return self
+            def __exit__(self, *a): return self._f.__exit__(*a)
+            def __getattr__(self, name): return getattr(self._f, name)
+
+        def patched_open(file, mode='r', *a, **kw):
+            f = real_open(file, mode, *a, **kw)
+            if 'w' in mode and os.fspath(file).endswith('RomFS.img.part'):
+                return FailingWriter(f)
+            return f
+
+        with mock.patch.object(romfs_image, 'open', side_effect=patched_open, create=True), \
+             mock.patch.object(sys, 'argv', ['pack_nup.py', str(self.path), '--work-dir', str(work)]):
+            with self.assertRaises(SystemExit) as ctx:
+                pack_nup.main()
+        self.assertIn('[RED]', str(ctx.exception))
+        self.assertIn(os.strerror(errno.ENOSPC), str(ctx.exception))
+        self.assertEqual(img.read_bytes(), previous)
+        self.assertFalse(Path(str(img) + '.part').exists())
 
 
 if __name__ == '__main__':
